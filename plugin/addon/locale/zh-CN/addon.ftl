@@ -1,0 +1,11 @@
+startup-begin = FireFly-Agent-Zotero 加载中
+startup-finish = FireFly-Agent-Zotero 已就绪
+menuitem-label = FireFly-Agent-Zotero：帮助工具示例
+menupopup-label = FireFly-Agent-Zotero：弹出菜单
+menuitem-submenulabel = FireFly-Agent-Zotero：子菜单
+menuitem-filemenulabel = FireFly-Agent-Zotero：文件菜单
+prefs-title = FireFly-Agent-Zotero
+prefs-table-title = 标题
+prefs-table-detail = 详情
+tabpanel-lib-tab-label = 库标签
+tabpanel-reader-tab-label = 阅读器标签

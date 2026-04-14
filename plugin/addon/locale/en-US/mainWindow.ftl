@@ -1,0 +1,11 @@
+item-section-example1-head-text =
+    .label = FireFly-Agent-Zotero: Item Info
+item-section-example1-sidenav-tooltip =
+    .tooltiptext = FireFly-Agent-Zotero section (item info)
+item-section-example2-head-text =
+    .label = FireFly-Agent-Zotero: Reader [{$status}]
+item-section-example2-sidenav-tooltip =
+    .tooltiptext = FireFly-Agent-Zotero section (reader)
+item-section-example2-button-tooltip =
+    .tooltiptext = Unregister this section
+item-info-row-example-label = Example Row

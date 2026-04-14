@@ -1,53 +1,53 @@
 ---
 name: clawhub
-description: Search and install agent skills from ClawHub, the public skill registry.
+description: 从 ClawHub 公共技能注册表搜索并安装技能。
 homepage: https://clawhub.ai
 metadata: {"nanobot":{"emoji":"🦞"}}
 ---
 
-# ClawHub
+# 爪轮
 
-Public skill registry for AI agents. Search by natural language (vector search).
+AI 代理的公共技能注册表。按自然语言搜索（矢量搜索）。
 
-## When to use
+## 何时使用
 
-Use this skill when the user asks any of:
-- "find a skill for …"
-- "search for skills"
-- "install a skill"
-- "what skills are available?"
-- "update my skills"
+当用户提出以下任何问题时使用此技能：
+- “找到一项技能……”
+- “寻找技能”
+- “安装技能”
+- “有什么技能可以使用？”
+- “更新我的技能”
 
-## Search
+## 搜索
 
 ```bash
 npx --yes clawhub@latest search "web scraping" --limit 5
 ```
 
-## Install
+## 安装
 
 ```bash
 npx --yes clawhub@latest install <slug> --workdir ~/.nanobot/workspace
 ```
 
-Replace `<slug>` with the skill name from search results. This places the skill into `~/.nanobot/workspace/skills/`, where nanobot loads workspace skills from. Always include `--workdir`.
+将 `<slug>` 替换为搜索结果中的技能名称。这会将技能放入 `~/.nanobot/workspace/skills/` 中，纳米机器人从中加载工作区技能。始终包含 `--workdir`。
 
-## Update
+## 更新
 
 ```bash
 npx --yes clawhub@latest update --all --workdir ~/.nanobot/workspace
 ```
 
-## List installed
+## 已安装列表
 
 ```bash
 npx --yes clawhub@latest list --workdir ~/.nanobot/workspace
 ```
 
-## Notes
+## 笔记
 
-- Requires Node.js (`npx` comes with it).
-- No API key needed for search and install.
-- Login (`npx --yes clawhub@latest login`) is only required for publishing.
-- `--workdir ~/.nanobot/workspace` is critical — without it, skills install to the current directory instead of the nanobot workspace.
-- After install, remind the user to start a new session to load the skill.
+- 需要 Node.js（`npx` 附带）。
+- 搜索和安装不需要 API 密钥。
+- 仅发布时需要登录 (`npx --yes clawhub@latest login`)。
+- `--workdir ~/.nanobot/workspace` 至关重要 - 没有它，技能将安装到当前目录而不是纳米机器人工作区。
+- 安装后，提醒用户启动新会话来加载技能。

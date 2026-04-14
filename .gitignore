@@ -1,0 +1,97 @@
+# Project-specific
+.worktrees/
+.assets
+.docs
+.web
+.scaffold
+
+# Monorepo subprojects (explicit)
+plugin/node_modules/
+plugin/build/
+plugin/logs/
+backend/nanobot/.venv/
+backend/nanobot/venv/
+backend/nanobot/.pytest_cache/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Node.js
+node_modules/
+pnpm-lock.yaml
+yarn.lock
+tsconfig.tsbuildinfo
+
+# Python bytecode & caches
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+__pycache__/
+*.egg-info/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.dmypy.json
+dmypy.json
+.tox/
+.nox/
+.hypothesis/
+
+# Build & packaging
+dist/
+build/
+*.manifest
+*.spec
+pip-wheel-metadata/
+share/python-wheels/
+
+# Test & coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# Lock files (project policy)
+poetry.lock
+uv.lock
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors & IDEs
+.vscode/
+.cursor/
+.idea/
+.fleet/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+nano.*.save
+
+# Logs & temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.directory

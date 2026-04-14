@@ -1,23 +1,23 @@
 ---
 name: summarize
-description: Summarize or extract text/transcripts from URLs, podcasts, and local files (great fallback for “transcribe this YouTube/video”).
+description: 总结 URL、本地文件与 YouTube 内容；也可用于提取转录文本。
 homepage: https://summarize.sh
-metadata: {"nanobot":{"emoji":"🧾","requires":{"bins":["summarize"]},"install":[{"id":"brew","kind":"brew","formula":"steipete/tap/summarize","bins":["summarize"],"label":"Install summarize (brew)"}]}}
+metadata: {"nanobot":{"emoji":"🧾","requires":{"bins":["summarize"]},"install":[{"id":"brew","kind":"brew","formula":"steipete/tap/summarize","bins":["summarize"],"label":"安装 summarize (brew)"}]}}
 ---
 
-# Summarize
+# 总结
 
-Fast CLI to summarize URLs, local files, and YouTube links.
+用于汇总 URL、本地文件和 YouTube 链接的快速 CLI。
 
-## When to use (trigger phrases)
+## 何时使用（触发短语）
 
-Use this skill immediately when the user asks any of:
-- “use summarize.sh”
-- “what’s this link/video about?”
-- “summarize this URL/article”
-- “transcribe this YouTube/video” (best-effort transcript extraction; no `yt-dlp` needed)
+当用户提出以下任何问题时立即使用此技能：
+- “使用summary.sh”
+- “这个链接/视频是关于什么的？”
+- “总结一下这个网址/文章”
+- “转录此 YouTube/视频”（尽力提取转录内容；无需 `yt-dlp`）
 
-## Quick start
+## 快速启动
 
 ```bash
 summarize "https://example.com" --model google/gemini-3-flash-preview
@@ -25,43 +25,43 @@ summarize "/path/to/file.pdf" --model google/gemini-3-flash-preview
 summarize "https://youtu.be/dQw4w9WgXcQ" --youtube auto
 ```
 
-## YouTube: summary vs transcript
+## YouTube：摘要与文字记录
 
-Best-effort transcript (URLs only):
+尽力而为的成绩单（仅限 URL）：
 
 ```bash
 summarize "https://youtu.be/dQw4w9WgXcQ" --youtube auto --extract-only
 ```
 
-If the user asked for a transcript but it’s huge, return a tight summary first, then ask which section/time range to expand.
+如果用户要求提供文字记录，但文字内容很大，请先返回一个简短的摘要，然后询问要扩展哪个部分/时间范围。
 
-## Model + keys
+## 型号+钥匙
 
-Set the API key for your chosen provider:
-- OpenAI: `OPENAI_API_KEY`
-- Anthropic: `ANTHROPIC_API_KEY`
-- xAI: `XAI_API_KEY`
-- Google: `GEMINI_API_KEY` (aliases: `GOOGLE_GENERATIVE_AI_API_KEY`, `GOOGLE_API_KEY`)
+为您选择的提供商设置 API 密钥：
+- 开放人工智能：`OPENAI_API_KEY`
+- 人择：`ANTHROPIC_API_KEY`
+- xAI：`XAI_API_KEY`
+- Google：`GEMINI_API_KEY`（别名：`GOOGLE_GENERATIVE_AI_API_KEY`、`GOOGLE_API_KEY`）
 
-Default model is `google/gemini-3-flash-preview` if none is set.
+如果未设置，则默认模型为 `google/gemini-3-flash-preview`。
 
-## Useful flags
+## 有用的标志
 
-- `--length short|medium|long|xl|xxl|<chars>`
-- `--max-output-tokens <count>`
-- `--extract-only` (URLs only)
-- `--json` (machine readable)
-- `--firecrawl auto|off|always` (fallback extraction)
-- `--youtube auto` (Apify fallback if `APIFY_API_TOKEN` set)
+- `--model <provider/model>`（指定模型）
+- `--youtube auto`（启用 YouTube 自动策略）
+- `--extract-only`（仅限 URL）
+- `--json`（机器可读）
+- `--firecrawl auto|off|always`（后备提取）
+- `--youtube auto`（如果设置了 `APIFY_API_TOKEN`，则 Apify 回退）
 
-## Config
+## 配置
 
-Optional config file: `~/.summarize/config.json`
+可选配置文件：`~/.summarize/config.json`
 
 ```json
 { "model": "openai/gpt-5.2" }
 ```
 
-Optional services:
-- `FIRECRAWL_API_KEY` for blocked sites
-- `APIFY_API_TOKEN` for YouTube fallback
+可选服务：
+- `FIRECRAWL_API_KEY` 用于被阻止的网站
+- `APIFY_API_TOKEN` 用于 YouTube 后备

@@ -1,0 +1,11 @@
+startup-begin = FireFly-Agent-Zotero is loading
+startup-finish = FireFly-Agent-Zotero is ready
+menuitem-label = FireFly-Agent-Zotero: Helper Examples
+menupopup-label = FireFly-Agent-Zotero: Menupopup
+menuitem-submenulabel = FireFly-Agent-Zotero
+menuitem-filemenulabel = FireFly-Agent-Zotero: File Menuitem
+prefs-title = FireFly-Agent-Zotero
+prefs-table-title = Title
+prefs-table-detail = Detail
+tabpanel-lib-tab-label = Lib Tab
+tabpanel-reader-tab-label = Reader Tab
