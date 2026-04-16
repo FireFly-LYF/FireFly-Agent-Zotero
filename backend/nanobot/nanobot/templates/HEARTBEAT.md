@@ -1,16 +1,16 @@
-# Heartbeat Tasks
+# Heartbeat 任务
 
-This file is checked every 30 minutes by your nanobot agent.
-Add tasks below that you want the agent to work on periodically.
+你的 nanobot 会每 30 分钟检查一次该文件。
+请在下方添加你希望 Agent 周期执行的任务。
 
-If this file has no tasks (only headers and comments), the agent will skip the heartbeat.
+如果本文件没有任务（只有标题和注释），Agent 会跳过 heartbeat 执行。
 
-## Active Tasks
+## 进行中任务
 
-<!-- Add your periodic tasks below this line -->
+<!-- 在此行下方添加你的周期任务 -->
 
 
-## Completed
+## 已完成
 
-<!-- Move completed tasks here or delete them -->
+<!-- 将已完成任务移到这里，或直接删除 -->
 

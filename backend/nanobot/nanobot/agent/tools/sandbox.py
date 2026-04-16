@@ -1,4 +1,4 @@
-"""Sandbox backends for shell command execution.
+"""用于 shell 命令执行的沙箱后端。
 
 To add a new backend, implement a function with the signature:
     _wrap_<name>(command: str, workspace: str, cwd: str) -> str
@@ -12,7 +12,7 @@ from nanobot.config.paths import get_media_dir
 
 
 def _bwrap(command: str, workspace: str, cwd: str) -> str:
-    """Wrap command in a bubblewrap sandbox (requires bwrap in container).
+    """将命令包装进 bubblewrap 沙箱（容器内需安装 bwrap）。
 
     Only the workspace is bind-mounted read-write; its parent dir (which holds
     config.json) is hidden behind a fresh tmpfs.  The media directory is
@@ -49,7 +49,7 @@ _BACKENDS = {"bwrap": _bwrap}
 
 
 def wrap_command(sandbox: str, command: str, workspace: str, cwd: str) -> str:
-    """Wrap *command* using the named sandbox backend."""
+    """使用指定沙箱后端包装 *command*。"""
     if backend := _BACKENDS.get(sandbox):
         return backend(command, workspace, cwd)
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")

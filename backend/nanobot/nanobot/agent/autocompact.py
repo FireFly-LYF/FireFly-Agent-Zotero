@@ -1,4 +1,4 @@
-"""Auto compact: proactive compression of idle sessions to reduce token cost and latency."""
+"""自动压缩：主动压缩空闲会话，降低 token 成本与延迟。"""
 
 from __future__ import annotations
 
@@ -35,12 +35,12 @@ class AutoCompact:
     @staticmethod
     def _format_summary(text: str, last_active: datetime) -> str:
         idle_min = int((datetime.now() - last_active).total_seconds() / 60)
-        return f"Inactive for {idle_min} minutes.\nPrevious conversation summary: {text}"
+        return f"已空闲 {idle_min} 分钟。\n上一段对话摘要：{text}"
 
     def _split_unconsolidated(
         self, session: Session,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Split live session tail into archiveable prefix and retained recent suffix."""
+        """将当前会话尾部分成可归档前缀与需保留的近期后缀。"""
         tail = list(session.messages[session.last_consolidated:])
         if not tail:
             return [], []
@@ -60,7 +60,7 @@ class AutoCompact:
 
     def check_expired(self, schedule_background: Callable[[Coroutine], None],
                       active_session_keys: Collection[str] = ()) -> None:
-        """Schedule archival for idle sessions, skipping those with in-flight agent tasks."""
+        """为闲置会话安排归档，跳过仍有进行中任务的会话。"""
         now = datetime.now()
         for info in self.sessions.list_sessions():
             key = info.get("key", "")
@@ -111,8 +111,8 @@ class AutoCompact:
         if key in self._archiving or self._is_expired(session.updated_at):
             logger.info("Auto-compact: reloading session {} (archiving={})", key, key in self._archiving)
             session = self.sessions.get_or_create(key)
-        # Hot path: summary from in-memory dict (process hasn't restarted).
-        # Also clean metadata copy so stale _last_summary never leaks to disk.
+        # 热路径：直接从内存字典读取摘要（进程尚未重启）。
+        # 同时清理 metadata 副本，避免陈旧的 _last_summary 落盘。
         entry = self._summaries.pop(key, None)
         if entry:
             session.metadata.pop("_last_summary", None)

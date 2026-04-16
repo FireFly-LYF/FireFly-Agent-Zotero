@@ -1,4 +1,4 @@
-"""MCP client: connects to MCP servers and wraps their tools as native nanobot tools."""
+"""MCP 客户端：连接 MCP 服务器并将其工具封装为原生 nanobot 工具。"""
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -12,7 +12,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 
 
 def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None:
-    """Return the single non-null branch for nullable unions."""
+    """返回可空联合类型中唯一的非空分支。"""
     if not isinstance(options, list):
         return None
 
@@ -32,7 +32,7 @@ def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None
 
 
 def _normalize_schema_for_openai(schema: Any) -> dict[str, Any]:
-    """Normalize only nullable JSON Schema patterns for tool definitions."""
+    """仅对可空 JSON Schema 模式进行规范化，用于工具定义。"""
     if not isinstance(schema, dict):
         return {"type": "object", "properties": {}}
 
@@ -73,7 +73,7 @@ def _normalize_schema_for_openai(schema: Any) -> dict[str, Any]:
 
 
 class MCPToolWrapper(Tool):
-    """Wraps a single MCP server tool as a nanobot Tool."""
+    """将单个 MCP 服务器工具封装为 nanobot Tool。"""
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
         self._session = session
@@ -108,8 +108,8 @@ class MCPToolWrapper(Tool):
             logger.warning("MCP tool '{}' timed out after {}s", self._name, self._tool_timeout)
             return f"(MCP tool call timed out after {self._tool_timeout}s)"
         except asyncio.CancelledError:
-            # MCP SDK's anyio cancel scopes can leak CancelledError on timeout/failure.
-            # Re-raise only if our task was externally cancelled (e.g. /stop).
+            # MCP SDK 的 anyio cancel scope 在超时/失败时可能泄漏 CancelledError。
+            # 仅在任务被外部取消（如 /stop）时重新抛出。
             task = asyncio.current_task()
             if task is not None and task.cancelling() > 0:
                 raise
@@ -134,7 +134,7 @@ class MCPToolWrapper(Tool):
 
 
 class MCPResourceWrapper(Tool):
-    """Wraps an MCP resource URI as a read-only nanobot Tool."""
+    """将 MCP 资源 URI 封装为只读 nanobot Tool。"""
 
     def __init__(self, session, server_name: str, resource_def, resource_timeout: int = 30):
         self._session = session
@@ -205,7 +205,7 @@ class MCPResourceWrapper(Tool):
 
 
 class MCPPromptWrapper(Tool):
-    """Wraps an MCP prompt as a read-only nanobot Tool."""
+    """将 MCP prompt 封装为只读 nanobot Tool。"""
 
     def __init__(self, session, server_name: str, prompt_def, prompt_timeout: int = 30):
         self._session = session
@@ -218,7 +218,7 @@ class MCPPromptWrapper(Tool):
         )
         self._prompt_timeout = prompt_timeout
 
-        # Build parameters from prompt arguments
+        # 根据 prompt 参数构建工具参数
         properties: dict[str, Any] = {}
         required: list[str] = []
         for arg in prompt_def.arguments or []:
@@ -288,7 +288,7 @@ class MCPPromptWrapper(Tool):
         parts: list[str] = []
         for message in result.messages:
             content = message.content
-            # content is a single ContentBlock (not a list) in MCP SDK >= 1.x
+            # 在 MCP SDK >= 1.x 中，content 是单个 ContentBlock（不是列表）
             if isinstance(content, types.TextContent):
                 parts.append(content.text)
             elif isinstance(content, list):
@@ -305,7 +305,7 @@ class MCPPromptWrapper(Tool):
 async def connect_mcp_servers(
     mcp_servers: dict, registry: ToolRegistry
 ) -> dict[str, AsyncExitStack]:
-    """Connect to configured MCP servers and register their tools, resources, prompts.
+    """连接配置的 MCP 服务器并注册其工具、资源与 prompts。
 
     Returns a dict mapping server name -> its dedicated AsyncExitStack.
     Each server gets its own stack and runs in its own task to prevent

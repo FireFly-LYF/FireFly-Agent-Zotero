@@ -1,4 +1,4 @@
-"""Tool registry for dynamic tool management."""
+"""用于动态管理工具的注册表。"""
 
 from typing import Any
 
@@ -16,24 +16,24 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
-        """Register a tool."""
+        """注册工具。"""
         self._tools[tool.name] = tool
 
     def unregister(self, name: str) -> None:
-        """Unregister a tool by name."""
+        """按名称注销工具。"""
         self._tools.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
-        """Get a tool by name."""
+        """按名称获取工具。"""
         return self._tools.get(name)
 
     def has(self, name: str) -> bool:
-        """Check if a tool is registered."""
+        """检查工具是否已注册。"""
         return name in self._tools
 
     @staticmethod
     def _schema_name(schema: dict[str, Any]) -> str:
-        """Extract a normalized tool name from either OpenAI or flat schemas."""
+        """从 OpenAI 或扁平 schema 中提取规范化工具名。"""
         fn = schema.get("function")
         if isinstance(fn, dict):
             name = fn.get("name")
@@ -43,7 +43,7 @@ class ToolRegistry:
         return name if isinstance(name, str) else ""
 
     def get_definitions(self) -> list[dict[str, Any]]:
-        """Get tool definitions with stable ordering for cache-friendly prompts.
+        """按稳定顺序获取工具定义，提升提示词缓存友好性。
 
         Built-in tools are sorted first as a stable prefix, then MCP tools are
         sorted and appended.
@@ -67,8 +67,8 @@ class ToolRegistry:
         name: str,
         params: dict[str, Any],
     ) -> tuple[Tool | None, dict[str, Any], str | None]:
-        """Resolve, cast, and validate one tool call."""
-        # Guard against invalid parameter types (e.g., list instead of dict)
+        """解析、类型转换并校验单次工具调用。"""
+        # 防御非法参数类型（例如 list 误传成 dict）
         if not isinstance(params, dict) and name in ('write_file', 'read_file'):
             return None, params, (
                 f"Error: Tool '{name}' parameters must be a JSON object, got {type(params).__name__}. "
@@ -90,7 +90,7 @@ class ToolRegistry:
         return tool, cast_params, None
 
     async def execute(self, name: str, params: dict[str, Any]) -> Any:
-        """Execute a tool by name with given parameters."""
+        """按名称与给定参数执行工具。"""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
         tool, params, error = self.prepare_call(name, params)
         if error:
@@ -107,7 +107,7 @@ class ToolRegistry:
 
     @property
     def tool_names(self) -> list[str]:
-        """Get list of registered tool names."""
+        """获取已注册工具名称列表。"""
         return list(self._tools.keys())
 
     def __len__(self) -> int:

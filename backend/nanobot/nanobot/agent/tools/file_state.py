@@ -1,4 +1,4 @@
-"""Track file-read state for read-before-edit warnings and read deduplication."""
+"""跟踪文件读取状态，用于编辑前警告与读取去重。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _hash_file(p: str) -> str | None:
 
 
 def record_read(path: str | Path, offset: int = 1, limit: int | None = None) -> None:
-    """Record that a file was read (called after successful read)."""
+    """记录文件已读取（成功读取后调用）。"""
     p = str(Path(path).resolve())
     try:
         mtime = os.path.getmtime(p)
@@ -44,7 +44,7 @@ def record_read(path: str | Path, offset: int = 1, limit: int | None = None) -> 
 
 
 def record_write(path: str | Path) -> None:
-    """Record that a file was written (updates mtime in state)."""
+    """记录文件已写入（同步更新状态中的 mtime）。"""
     p = str(Path(path).resolve())
     try:
         mtime = os.path.getmtime(p)
@@ -61,7 +61,7 @@ def record_write(path: str | Path) -> None:
 
 
 def check_read(path: str | Path) -> str | None:
-    """Check if a file has been read and is fresh.
+    """检查文件是否已读取且状态仍新鲜。
 
     Returns None if OK, or a warning string.
     When mtime changed but file content is identical (e.g. touch, editor save),
@@ -84,7 +84,7 @@ def check_read(path: str | Path) -> str | None:
 
 
 def is_unchanged(path: str | Path, offset: int = 1, limit: int | None = None) -> bool:
-    """Return True if file was previously read with same params and mtime is unchanged."""
+    """若文件曾以相同参数读取且 mtime 未变化，则返回 True。"""
     p = str(Path(path).resolve())
     entry = _state.get(p)
     if entry is None:
@@ -101,5 +101,5 @@ def is_unchanged(path: str | Path, offset: int = 1, limit: int | None = None) ->
 
 
 def clear() -> None:
-    """Clear all tracked state (useful for testing)."""
+    """清空全部跟踪状态（便于测试）。"""
     _state.clear()

@@ -1,4 +1,4 @@
-"""Search tools: grep and glob."""
+"""搜索工具：grep 与 glob。"""
 
 from __future__ import annotations
 
@@ -133,7 +133,7 @@ class _SearchTool(_FsTool):
 
 
 class GlobTool(_SearchTool):
-    """Find files matching a glob pattern."""
+    """查找匹配 glob 模式的文件。"""
 
     @property
     def name(self) -> str:
@@ -251,7 +251,7 @@ class GlobTool(_SearchTool):
 
 
 class GrepTool(_SearchTool):
-    """Search file contents using a regex-like pattern."""
+    """使用类正则模式搜索文件内容。"""
     _MAX_RESULT_CHARS = 128_000
     _MAX_FILE_BYTES = 2_000_000
 

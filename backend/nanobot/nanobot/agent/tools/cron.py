@@ -1,4 +1,4 @@
-"""Cron tool for scheduling reminders and tasks."""
+"""用于调度提醒与任务的 Cron 工具。"""
 
 from contextvars import ContextVar
 from datetime import datetime
@@ -40,7 +40,7 @@ from nanobot.cron.types import CronJob, CronJobState, CronSchedule
     )
 )
 class CronTool(Tool):
-    """Tool to schedule reminders and recurring tasks."""
+    """用于安排提醒和周期任务的工具。"""
 
     def __init__(self, cron_service: CronService, default_timezone: str = "UTC"):
         self._cron = cron_service
@@ -50,16 +50,16 @@ class CronTool(Tool):
         self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
     def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context for delivery."""
+        """设置当前会话上下文，用于投递。"""
         self._channel = channel
         self._chat_id = chat_id
 
     def set_cron_context(self, active: bool):
-        """Mark whether the tool is executing inside a cron job callback."""
+        """标记当前是否在 cron 作业回调中执行。"""
         return self._in_cron_context.set(active)
 
     def reset_cron_context(self, token) -> None:
-        """Restore previous cron context."""
+        """恢复先前的 cron 上下文。"""
         self._in_cron_context.reset(token)
 
     @staticmethod
@@ -73,7 +73,7 @@ class CronTool(Tool):
         return None
 
     def _display_timezone(self, schedule: CronSchedule) -> str:
-        """Pick the most human-meaningful timezone for display."""
+        """选择对人类最友好的展示时区。"""
         return schedule.tz or self._default_timezone
 
     @staticmethod
@@ -137,7 +137,7 @@ class CronTool(Tool):
             if err := self._validate_timezone(tz):
                 return err
 
-        # Build schedule
+        # 构建调度计划
         delete_after = False
         if every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
@@ -175,7 +175,7 @@ class CronTool(Tool):
         return f"Created job '{job.name}' (id: {job.id})"
 
     def _format_timing(self, schedule: CronSchedule) -> str:
-        """Format schedule as a human-readable timing string."""
+        """将调度格式化为人类可读的时间字符串。"""
         if schedule.kind == "cron":
             tz = f" ({schedule.tz})" if schedule.tz else ""
             return f"cron: {schedule.expr}{tz}"
@@ -193,7 +193,7 @@ class CronTool(Tool):
         return schedule.kind
 
     def _format_state(self, state: CronJobState, schedule: CronSchedule) -> list[str]:
-        """Format job run state as display lines."""
+        """将任务运行状态格式化为可显示行。"""
         lines: list[str] = []
         display_tz = self._display_timezone(schedule)
         if state.last_run_at_ms:

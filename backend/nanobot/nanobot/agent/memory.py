@@ -1,4 +1,4 @@
-"""Memory system: pure file I/O store, lightweight Consolidator, and Dream processor."""
+"""记忆系统：纯文件 I/O 存储、轻量 Consolidator 与 Dream 处理器。"""
 
 from __future__ import annotations
 
@@ -25,11 +25,11 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# MemoryStore — pure file I/O layer
+# MemoryStore —— 纯文件 I/O 层
 # ---------------------------------------------------------------------------
 
 class MemoryStore:
-    """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
+    """用于记忆文件的纯文件 I/O：MEMORY.md、history.jsonl、SOUL.md、USER.md。"""
 
     _DEFAULT_MAX_HISTORY = 1000
     _LEGACY_ENTRY_START_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}[^\]]*)\]\s*")
@@ -68,7 +68,7 @@ class MemoryStore:
             return ""
 
     def _maybe_migrate_legacy_history(self) -> None:
-        """One-time upgrade from legacy HISTORY.md to history.jsonl.
+        """将旧版 HISTORY.md 一次性升级到 history.jsonl。
 
         The migration is best-effort and prioritizes preserving as much content
         as possible over perfect parsing.
@@ -93,8 +93,8 @@ class MemoryStore:
                 self._write_entries(entries)
                 last_cursor = entries[-1]["cursor"]
                 self._cursor_file.write_text(str(last_cursor), encoding="utf-8")
-                # Default to "already processed" so upgrades do not replay the
-                # user's entire historical archive into Dream on first start.
+                # 默认标记为“已处理”，避免升级后重放
+                # 用户全部历史归档到 Dream（首次启动时）。
                 self._dream_cursor_file.write_text(str(last_cursor), encoding="utf-8")
 
             backup_path = self._next_legacy_backup_path()
@@ -221,7 +221,7 @@ class MemoryStore:
     # -- history.jsonl — append-only, JSONL format ---------------------------
 
     def append_history(self, entry: str) -> int:
-        """Append *entry* to history.jsonl and return its auto-incrementing cursor."""
+        """将 *entry* 追加到 history.jsonl，并返回自增游标。"""
         cursor = self._next_cursor()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         record = {"cursor": cursor, "timestamp": ts, "content": strip_think(entry.rstrip()) or entry.rstrip()}
@@ -231,24 +231,24 @@ class MemoryStore:
         return cursor
 
     def _next_cursor(self) -> int:
-        """Read the current cursor counter and return next value."""
+        """读取当前游标计数并返回下一个值。"""
         if self._cursor_file.exists():
             try:
                 return int(self._cursor_file.read_text(encoding="utf-8").strip()) + 1
             except (ValueError, OSError):
                 pass
-        # Fallback: read last line's cursor from the JSONL file.
+        # 回退方案：从 JSONL 最后一行读取游标。
         last = self._read_last_entry()
         if last:
             return last["cursor"] + 1
         return 1
 
     def read_unprocessed_history(self, since_cursor: int) -> list[dict[str, Any]]:
-        """Return history entries with cursor > *since_cursor*."""
+        """返回游标大于 *since_cursor* 的历史条目。"""
         return [e for e in self._read_entries() if e["cursor"] > since_cursor]
 
     def compact_history(self) -> None:
-        """Drop oldest entries if the file exceeds *max_history_entries*."""
+        """当文件超过 *max_history_entries* 时丢弃最旧条目。"""
         if self.max_history_entries <= 0:
             return
         entries = self._read_entries()
@@ -260,7 +260,7 @@ class MemoryStore:
     # -- JSONL helpers -------------------------------------------------------
 
     def _read_entries(self) -> list[dict[str, Any]]:
-        """Read all entries from history.jsonl."""
+        """读取 history.jsonl 的全部条目。"""
         entries: list[dict[str, Any]] = []
         try:
             with open(self.history_file, "r", encoding="utf-8") as f:
@@ -276,7 +276,7 @@ class MemoryStore:
         return entries
 
     def _read_last_entry(self) -> dict[str, Any] | None:
-        """Read the last entry from the JSONL file efficiently."""
+        """高效读取 JSONL 文件中的最后一条记录。"""
         try:
             with open(self.history_file, "rb") as f:
                 f.seek(0, 2)
@@ -294,7 +294,7 @@ class MemoryStore:
             return None
 
     def _write_entries(self, entries: list[dict[str, Any]]) -> None:
-        """Overwrite history.jsonl with the given entries."""
+        """使用给定条目覆盖写入 history.jsonl。"""
         with open(self.history_file, "w", encoding="utf-8") as f:
             for entry in entries:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -327,7 +327,7 @@ class MemoryStore:
         return "\n".join(lines)
 
     def raw_archive(self, messages: list[dict]) -> None:
-        """Fallback: dump raw messages to history.jsonl without LLM summarization."""
+        """回退策略：不经 LLM 总结，直接将原始消息写入 history.jsonl。"""
         self.append_history(
             f"[RAW] {len(messages)} messages\n"
             f"{self._format_messages(messages)}"
@@ -339,12 +339,12 @@ class MemoryStore:
 
 
 # ---------------------------------------------------------------------------
-# Consolidator — lightweight token-budget triggered consolidation
+# Consolidator —— 由 token 预算触发的轻量归档
 # ---------------------------------------------------------------------------
 
 
 class Consolidator:
-    """Lightweight consolidation: summarizes evicted messages into history.jsonl."""
+    """轻量归档：将被淘汰消息总结后写入 history.jsonl。"""
 
     _MAX_CONSOLIDATION_ROUNDS = 5
     _MAX_CHUNK_MESSAGES = 60  # hard cap per consolidation round
@@ -375,7 +375,7 @@ class Consolidator:
         )
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
-        """Return the shared consolidation lock for one session."""
+        """返回某个会话共享的归档锁。"""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
     def pick_consolidation_boundary(
@@ -383,7 +383,7 @@ class Consolidator:
         session: Session,
         tokens_to_remove: int,
     ) -> tuple[int, int] | None:
-        """Pick a user-turn boundary that removes enough old prompt tokens."""
+        """选择一个用户轮次边界，以移除足够多的旧提示词 token。"""
         start = session.last_consolidated
         if start >= len(session.messages) or tokens_to_remove <= 0:
             return None
@@ -405,7 +405,7 @@ class Consolidator:
         session: Session,
         end_idx: int,
     ) -> int | None:
-        """Clamp the chunk size without breaking the user-turn boundary."""
+        """限制分块大小，同时不破坏用户轮次边界。"""
         start = session.last_consolidated
         if end_idx - start <= self._MAX_CHUNK_MESSAGES:
             return end_idx
@@ -417,7 +417,7 @@ class Consolidator:
         return None
 
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
-        """Estimate current prompt size for the normal session history view."""
+        """估算常规会话历史视图下的当前提示词大小。"""
         history = session.get_history(max_messages=0)
         channel, chat_id = (session.key.split(":", 1) if ":" in session.key else (None, None))
         probe_messages = self._build_messages(
@@ -434,9 +434,9 @@ class Consolidator:
         )
 
     async def archive(self, messages: list[dict]) -> str | None:
-        """Summarize messages via LLM and append to history.jsonl.
+        """通过 LLM 总结消息并追加到 history.jsonl。
 
-        Returns the summary text on success, None if nothing to archive.
+        成功时返回摘要文本；若无可归档内容则返回 None。
         """
         if not messages:
             return None
@@ -466,10 +466,10 @@ class Consolidator:
             return None
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
-        """Loop: archive old messages until prompt fits within safe budget.
+        """循环归档旧消息，直到提示词落入安全预算。
 
-        The budget reserves space for completion tokens and a safety buffer
-        so the LLM request never exceeds the context window.
+        预算会预留 completion token 与安全缓冲
+        确保 LLM 请求不会超过上下文窗口。
         """
         if not session.messages or self.context_window_tokens <= 0:
             return
@@ -548,16 +548,16 @@ class Consolidator:
 
 
 # ---------------------------------------------------------------------------
-# Dream — heavyweight cron-scheduled memory consolidation
+# Dream —— 由 cron 调度的重型记忆归档
 # ---------------------------------------------------------------------------
 
 
 class Dream:
-    """Two-phase memory processor: analyze history.jsonl, then edit files via AgentRunner.
+    """两阶段记忆处理器：先分析 history.jsonl，再通过 AgentRunner 编辑文件。
 
-    Phase 1 produces an analysis summary (plain LLM call).
-    Phase 2 delegates to AgentRunner with read_file / edit_file tools so the
-    LLM can make targeted, incremental edits instead of replacing entire files.
+    第一阶段生成分析摘要（普通 LLM 调用）。
+    第二阶段委托给 AgentRunner，配合 read_file / edit_file 工具，
+    让 LLM 做定向增量修改，而不是整文件覆盖。
     """
 
     def __init__(
@@ -581,13 +581,13 @@ class Dream:
     # -- tool registry -------------------------------------------------------
 
     def _build_tools(self) -> ToolRegistry:
-        """Build a minimal tool registry for the Dream agent."""
+        """为 Dream agent 构建最小工具注册表。"""
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
         from nanobot.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
 
         tools = ToolRegistry()
         workspace = self.store.workspace
-        # Allow reading builtin skills for reference during skill creation
+        # 允许读取内置技能，便于创建技能时参考
         extra_read = [BUILTIN_SKILLS_DIR] if BUILTIN_SKILLS_DIR.exists() else None
         tools.register(ReadFileTool(
             workspace=workspace,
@@ -595,8 +595,8 @@ class Dream:
             extra_allowed_dirs=extra_read,
         ))
         tools.register(EditFileTool(workspace=workspace, allowed_dir=workspace))
-        # write_file resolves relative paths from workspace root, but can only
-        # write under skills/ so the prompt can safely use skills/<name>/SKILL.md.
+        # write_file 以工作区根目录解析相对路径，但仅允许写入
+        # skills/ 目录，保证提示词可安全使用 skills/<name>/SKILL.md。
         skills_dir = workspace / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
         tools.register(WriteFileTool(workspace=workspace, allowed_dir=skills_dir))
@@ -605,7 +605,7 @@ class Dream:
     # -- skill listing --------------------------------------------------------
 
     def _list_existing_skills(self) -> list[str]:
-        """List existing skills as 'name — description' for dedup context."""
+        """按“名称 — 描述”列出现有技能，供去重上下文使用。"""
         import re as _re
 
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
@@ -621,7 +621,7 @@ class Dream:
                 skill_md = d / "SKILL.md"
                 if not skill_md.exists():
                     continue
-                # Prefer workspace skills over builtin (same name)
+                # 同名时优先工作区技能而非内置技能
                 if d.name in entries and base == BUILTIN_SKILLS_DIR:
                     continue
                 content = skill_md.read_text(encoding="utf-8")[:500]
@@ -633,7 +633,7 @@ class Dream:
     # -- main entry ----------------------------------------------------------
 
     async def run(self) -> bool:
-        """Process unprocessed history entries. Returns True if work was done."""
+        """处理尚未处理的历史条目；若有实际工作返回 True。"""
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
         last_cursor = self.store.get_last_dream_cursor()
@@ -647,12 +647,12 @@ class Dream:
             len(entries), last_cursor, batch[-1]["cursor"], len(batch),
         )
 
-        # Build history text for LLM
+        # 为 LLM 构建历史文本
         history_text = "\n".join(
             f"[{e['timestamp']}] {e['content']}" for e in batch
         )
 
-        # Current file contents
+        # 当前文件内容
         current_date = datetime.now().strftime("%Y-%m-%d")
         current_memory = self.store.read_memory() or "(empty)"
         current_soul = self.store.read_soul() or "(empty)"
@@ -665,7 +665,7 @@ class Dream:
             f"## Current USER.md ({len(current_user)} chars)\n{current_user}"
         )
 
-        # Phase 1: Analyze (no skills list — dedup is Phase 2's job)
+        # 第一阶段：分析（不附技能列表——去重由第二阶段处理）
         phase1_prompt = (
             f"## Conversation History\n{history_text}\n\n{file_context}"
         )
@@ -689,7 +689,7 @@ class Dream:
             logger.exception("Dream Phase 1 failed")
             return False
 
-        # Phase 2: Delegate to AgentRunner with read_file / edit_file
+        # 第二阶段：委托 AgentRunner 执行 read_file / edit_file
         existing_skills = self._list_existing_skills()
         skills_section = ""
         if existing_skills:
@@ -732,14 +732,14 @@ class Dream:
             logger.exception("Dream Phase 2 failed")
             result = None
 
-        # Build changelog from tool events
+        # 根据工具事件构建变更日志
         changelog: list[str] = []
         if result and result.tool_events:
             for event in result.tool_events:
                 if event["status"] == "ok":
                     changelog.append(f"{event['name']}: {event['detail']}")
 
-        # Advance cursor — always, to avoid re-processing Phase 1
+        # 始终推进游标，避免重复处理第一阶段内容
         new_cursor = batch[-1]["cursor"]
         self.store.set_last_dream_cursor(new_cursor)
         self.store.compact_history()
@@ -756,7 +756,7 @@ class Dream:
                 reason, new_cursor,
             )
 
-        # Git auto-commit (only when there are actual changes)
+        # Git 自动提交（仅在有实际改动时）
         if changelog and self.store.git.is_initialized():
             ts = batch[-1]["timestamp"]
             sha = self.store.git.auto_commit(f"dream: {ts}, {len(changelog)} change(s)")

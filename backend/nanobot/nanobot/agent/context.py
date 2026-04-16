@@ -1,4 +1,4 @@
-"""Context builder for assembling agent prompts."""
+"""用于组装 Agent 提示词的上下文构建器。"""
 
 import base64
 import mimetypes
@@ -15,7 +15,7 @@ from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 
 
 class ContextBuilder:
-    """Builds the context (system prompt + messages) for the agent."""
+    """为 Agent 构建上下文（系统提示词 + 消息列表）。"""
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
@@ -33,7 +33,7 @@ class ContextBuilder:
         skill_names: list[str] | None = None,
         channel: str | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """从身份信息、引导文件、记忆与技能构建系统提示词。"""
         parts = [self._get_identity(channel=channel)]
 
         bootstrap = self._load_bootstrap_files()
@@ -64,7 +64,7 @@ class ContextBuilder:
         return "\n\n---\n\n".join(parts)
 
     def _get_identity(self, channel: str | None = None) -> str:
-        """Get the core identity section."""
+        """获取核心身份信息片段。"""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -82,7 +82,7 @@ class ContextBuilder:
         channel: str | None, chat_id: str | None, timezone: str | None = None,
         session_summary: str | None = None,
     ) -> str:
-        """Build untrusted runtime metadata block for injection before the user message."""
+        """构建不可信的运行时元数据块，注入到用户消息前。"""
         lines = [f"Current Time: {current_time_str(timezone)}"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
@@ -105,7 +105,7 @@ class ContextBuilder:
         return _to_blocks(left) + _to_blocks(right)
 
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+        """从工作区加载全部引导文件。"""
         parts = []
 
         for filename in self.BOOTSTRAP_FILES:
@@ -127,12 +127,12 @@ class ContextBuilder:
         current_role: str = "user",
         session_summary: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the complete message list for an LLM call."""
+        """构建一次 LLM 调用所需的完整消息列表。"""
         runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone, session_summary=session_summary)
         user_content = self._build_user_content(current_message, media)
 
-        # Merge runtime context and user content into a single user message
-        # to avoid consecutive same-role messages that some providers reject.
+        # 将运行时上下文与用户内容合并为一条用户消息
+        # 以避免连续同角色消息被部分提供商拒绝。
         if isinstance(user_content, str):
             merged = f"{runtime_ctx}\n\n{user_content}"
         else:
@@ -150,7 +150,7 @@ class ContextBuilder:
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """构建用户消息内容，可选附带 base64 编码图片。"""
         if not media:
             return text
 
@@ -160,7 +160,7 @@ class ContextBuilder:
             if not p.is_file():
                 continue
             raw = p.read_bytes()
-            # Detect real MIME type from magic bytes; fallback to filename guess
+            # 通过魔数识别真实 MIME 类型；失败时回退到文件名猜测
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
                 continue
@@ -179,7 +179,7 @@ class ContextBuilder:
         self, messages: list[dict[str, Any]],
         tool_call_id: str, tool_name: str, result: Any,
     ) -> list[dict[str, Any]]:
-        """Add a tool result to the message list."""
+        """向消息列表追加一条工具结果。"""
         messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
         return messages
 
@@ -190,7 +190,7 @@ class ContextBuilder:
         reasoning_content: str | None = None,
         thinking_blocks: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
-        """Add an assistant message to the message list."""
+        """向消息列表追加一条助手消息。"""
         messages.append(build_assistant_message(
             content,
             tool_calls=tool_calls,

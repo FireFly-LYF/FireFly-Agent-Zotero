@@ -1,0 +1,193 @@
+const BRIDGE_HOST = "127.0.0.1";
+const BRIDGE_PORT = 8765;
+const BRIDGE_HEALTH_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/health`;
+const BRIDGE_MESSAGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/message`;
+const BRIDGE_STREAM_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/stream`;
+
+const HEALTH_RETRY = 40;
+const HEALTH_INTERVAL_MS = 500;
+const HEALTH_TIMEOUT_MS = 2000;
+const SEND_TIMEOUT_MS = 15000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function zoteroHttpRequest(
+  method: "GET" | "POST",
+  url: string,
+  options: {
+    headers?: Record<string, string>;
+    body?: string;
+    timeout?: number;
+  } = {},
+): Promise<{ status: number; responseText: string }> {
+  const z: any = (globalThis as any).Zotero;
+  if (!z?.HTTP?.request) {
+    throw new Error("Zotero.HTTP.request is unavailable");
+  }
+  const resp = await z.HTTP.request(method, url, {
+    responseType: "text",
+    timeout: options.timeout ?? 15000,
+    headers: options.headers ?? {},
+    body: options.body,
+  });
+  return {
+    status: Number(resp?.status ?? 0),
+    responseText: String(resp?.responseText ?? ""),
+  };
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const AC: any = (globalThis as any).AbortController;
+
+  // Zotero 的运行环境在部分版本里没有 AbortController，需做兼容降级。
+  if (!AC) {
+    return (await Promise.race([
+      fetch(url, init),
+      new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs),
+      ),
+    ])) as Response;
+  }
+
+  const controller: any = new AC();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function isBridgeHealthy(): Promise<boolean> {
+  try {
+    const res = await zoteroHttpRequest("GET", BRIDGE_HEALTH_URL, {
+      timeout: HEALTH_TIMEOUT_MS,
+    });
+    return res.status >= 200 && res.status < 300;
+  } catch (_e1) {
+    try {
+      const res = await fetchWithTimeout(BRIDGE_HEALTH_URL, { method: "GET" }, HEALTH_TIMEOUT_MS);
+      return res.ok;
+    } catch (_e2) {
+      return false;
+    }
+  }
+}
+
+export async function ensureNanobotBridgeStarted(): Promise<void> {
+  if (await isBridgeHealthy()) return;
+  for (let i = 0; i < HEALTH_RETRY; i++) {
+    if (await isBridgeHealthy()) {
+      return;
+    }
+    await sleep(HEALTH_INTERVAL_MS);
+  }
+  throw new Error(
+    "Nanobot bridge not ready. Please run backend/nanobot/scripts/zotero_bridge_launcher.py manually.",
+  );
+}
+
+export async function sendToNanobot(message: string, sessionID = "cli:direct") {
+  const body = JSON.stringify({
+    message,
+    session_id: sessionID,
+  });
+  try {
+    const resp = await zoteroHttpRequest("POST", BRIDGE_MESSAGE_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: SEND_TIMEOUT_MS,
+    });
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`Bridge request failed: ${resp.status} ${resp.responseText}`);
+    }
+    return JSON.parse(resp.responseText || "{}");
+  } catch (_e1) {
+    const res = await fetchWithTimeout(
+      BRIDGE_MESSAGE_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+      SEND_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Bridge request failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  }
+}
+
+export async function streamFromNanobot(
+  message: string,
+  sessionID: string,
+  onDelta: (delta: string) => void,
+  onFinal?: (content: string) => void,
+): Promise<void> {
+  const body = JSON.stringify({
+    message,
+    session_id: sessionID,
+  });
+  const res = await fetchWithTimeout(
+    BRIDGE_STREAM_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    },
+    SEND_TIMEOUT_MS * 4,
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Bridge stream failed: ${res.status} ${text}`);
+  }
+  if (!res.body) {
+    throw new Error("Bridge stream has no response body");
+  }
+
+  const reader: any = (res.body as any).getReader({});
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let sepIdx = buffer.indexOf("\n\n");
+    while (sepIdx >= 0) {
+      const block = buffer.slice(0, sepIdx).trim();
+      buffer = buffer.slice(sepIdx + 2);
+      if (block.startsWith("data:")) {
+        const raw = block.slice(5).trim();
+        try {
+          const event = JSON.parse(raw) as {
+            type?: string;
+            delta?: string;
+            content?: string;
+            message?: string;
+          };
+          if (event.type === "delta" && event.delta) {
+            onDelta(event.delta);
+          } else if (event.type === "final" && event.content) {
+            onFinal?.(event.content);
+          } else if (event.type === "error") {
+            throw new Error(event.message || "unknown stream error");
+          }
+        } catch (e) {
+          throw new Error(`Invalid stream event: ${String(e)}`);
+        }
+      }
+      sepIdx = buffer.indexOf("\n\n");
+    }
+  }
+}
+

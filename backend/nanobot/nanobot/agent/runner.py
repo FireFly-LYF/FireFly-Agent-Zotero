@@ -1,4 +1,4 @@
-"""Shared execution loop for tool-using agents."""
+"""供工具型 agent 复用的执行循环。"""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 
 @dataclass(slots=True)
 class AgentRunSpec:
-    """Configuration for a single agent execution."""
+    """单次 agent 执行的配置。"""
 
     initial_messages: list[dict[str, Any]]
     tools: ToolRegistry
@@ -77,7 +77,7 @@ class AgentRunSpec:
 
 @dataclass(slots=True)
 class AgentRunResult:
-    """Outcome of a shared agent execution."""
+    """一次共享 agent 执行的结果。"""
 
     final_content: str | None
     messages: list[dict[str, Any]]
@@ -90,7 +90,7 @@ class AgentRunResult:
 
 
 class AgentRunner:
-    """Run a tool-capable LLM loop without product-layer concerns."""
+    """运行支持工具调用的 LLM 循环，不耦合产品层细节。"""
 
     def __init__(self, provider: LLMProvider):
         self.provider = provider
@@ -118,7 +118,7 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         injections: list[dict[str, Any]],
     ) -> None:
-        """Append injected user messages while preserving role alternation."""
+        """在保持角色交替的前提下追加注入的用户消息。"""
         for injection in injections:
             if (
                 messages
@@ -135,7 +135,7 @@ class AgentRunner:
             messages.append(injection)
 
     async def _drain_injections(self, spec: AgentRunSpec) -> list[dict[str, Any]]:
-        """Drain pending user messages via the injection callback.
+        """通过注入回调提取待处理用户消息。
 
         Returns normalized user messages (capped by
         ``_MAX_INJECTIONS_PER_TURN``), or an empty list when there is
@@ -196,16 +196,16 @@ class AgentRunner:
 
         for iteration in range(spec.max_iterations):
             try:
-                # Keep the persisted conversation untouched. Context governance
-                # may repair or compact historical messages for the model, but
-                # those synthetic edits must not shift the append boundary used
-                # later when the caller saves only the new turn.
+                # 保持已持久化对话不变。上下文治理
+                # 可能会为模型修复或压缩历史消息，但
+                # 这些合成修改不能改变后续保存新轮次时的
+                # 追加边界。
                 messages_for_model = self._drop_orphan_tool_results(messages)
                 messages_for_model = self._backfill_missing_tool_results(messages_for_model)
                 messages_for_model = self._microcompact(messages_for_model)
                 messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
                 messages_for_model = self._snip_history(spec, messages_for_model)
-                # Snipping may have created new orphans; clean them up.
+                # 裁剪后可能生成新的孤儿消息，需清理。
                 messages_for_model = self._drop_orphan_tool_results(messages_for_model)
                 messages_for_model = self._backfill_missing_tool_results(messages_for_model)
             except Exception as exc:
@@ -301,7 +301,7 @@ class AgentRunner:
                 )
                 empty_content_retries = 0
                 length_recovery_count = 0
-                # Checkpoint 1: drain injections after tools, before next LLM call
+                # 检查点 1：工具执行后、下次 LLM 调用前提取注入消息
                 if injection_cycles < _MAX_INJECTION_CYCLES:
                     injections = await self._drain_injections(spec)
                     if injections:
@@ -376,9 +376,9 @@ class AgentRunner:
                     thinking_blocks=response.thinking_blocks,
                 )
 
-            # Check for mid-turn injections BEFORE signaling stream end.
-            # If injections are found we keep the stream alive (resuming=True)
-            # so streaming channels don't prematurely finalize the card.
+            # 在发送流结束信号前检查是否有中途注入。
+            # 若检测到注入，则保持流持续（resuming=True）
+            # 防止流式渠道过早结束卡片。
             _injected_after_final = False
             if injection_cycles < _MAX_INJECTION_CYCLES:
                 injections = await self._drain_injections(spec)
@@ -719,7 +719,7 @@ class AgentRunner:
     def _drop_orphan_tool_results(
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Drop tool results that have no matching assistant tool_call earlier in the history."""
+        """丢弃历史中找不到对应 assistant tool_call 的工具结果。"""
         declared: set[str] = set()
         updated: list[dict[str, Any]] | None = None
         for idx, msg in enumerate(messages):
@@ -745,7 +745,7 @@ class AgentRunner:
     def _backfill_missing_tool_results(
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Insert synthetic error results for orphaned tool_use blocks."""
+        """为孤立的 tool_use 块插入合成错误结果。"""
         declared: list[tuple[int, str, str]] = []  # (assistant_idx, call_id, name)
         fulfilled: set[str] = set()
         for idx, msg in enumerate(messages):
@@ -784,7 +784,7 @@ class AgentRunner:
 
     @staticmethod
     def _microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Replace old compactable tool results with one-line summaries."""
+        """将可压缩的旧工具结果替换为单行摘要。"""
         compactable_indices: list[int] = []
         for idx, msg in enumerate(messages):
             if msg.get("role") == "tool" and msg.get("name") in _COMPACTABLE_TOOLS:

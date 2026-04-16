@@ -1,4 +1,4 @@
-"""Subagent manager for background task execution."""
+"""用于后台任务执行的子代理管理器。"""
 
 import asyncio
 import json
@@ -24,7 +24,7 @@ from nanobot.providers.base import LLMProvider
 
 
 class _SubagentHook(AgentHook):
-    """Logging-only hook for subagent execution."""
+    """仅用于记录日志的子代理执行钩子。"""
 
     def __init__(self, task_id: str) -> None:
         super().__init__()
@@ -40,7 +40,7 @@ class _SubagentHook(AgentHook):
 
 
 class SubagentManager:
-    """Manages background subagent execution."""
+    """管理后台子代理执行。"""
 
     def __init__(
         self,
@@ -77,7 +77,7 @@ class SubagentManager:
         origin_chat_id: str = "direct",
         session_key: str | None = None,
     ) -> str:
-        """Spawn a subagent to execute a task in the background."""
+        """启动子代理在后台执行任务。"""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
@@ -108,11 +108,11 @@ class SubagentManager:
         label: str,
         origin: dict[str, str],
     ) -> None:
-        """Execute the subagent task and announce the result."""
+        """执行子代理任务并广播结果。"""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
         try:
-            # Build subagent tools (no message tool, no spawn tool)
+            # 构建子代理工具集（不含 message 工具与 spawn 工具）
             tools = ToolRegistry()
             allowed_dir = self.workspace if (self.restrict_to_workspace or self.exec_config.sandbox) else None
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
@@ -189,7 +189,7 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
+        """通过消息总线将子代理结果通知主代理。"""
         status_text = "completed successfully" if status == "ok" else "failed"
 
         announce_content = render_template(
@@ -200,7 +200,7 @@ class SubagentManager:
             result=result,
         )
 
-        # Inject as system message to trigger main agent
+        # 以 system 消息注入，触发主代理处理
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
@@ -233,7 +233,7 @@ class SubagentManager:
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
     def _build_subagent_prompt(self) -> str:
-        """Build a focused system prompt for the subagent."""
+        """为子代理构建聚焦的系统提示词。"""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
@@ -250,7 +250,7 @@ class SubagentManager:
         )
 
     async def cancel_by_session(self, session_key: str) -> int:
-        """Cancel all subagents for the given session. Returns count cancelled."""
+        """取消指定会话下所有子代理，返回取消数量。"""
         tasks = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
                  if tid in self._running_tasks and not self._running_tasks[tid].done()]
         for t in tasks:
@@ -260,5 +260,5 @@ class SubagentManager:
         return len(tasks)
 
     def get_running_count(self) -> int:
-        """Return the number of currently running subagents."""
+        """返回当前运行中的子代理数量。"""
         return len(self._running_tasks)

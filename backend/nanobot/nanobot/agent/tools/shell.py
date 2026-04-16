@@ -1,4 +1,4 @@
-"""Shell execution tool."""
+"""Shell 执行工具。"""
 
 import asyncio
 import os
@@ -35,7 +35,7 @@ _IS_WINDOWS = sys.platform == "win32"
     )
 )
 class ExecTool(Tool):
-    """Tool to execute shell commands."""
+    """执行 shell 命令的工具。"""
 
     def __init__(
         self,
@@ -61,9 +61,9 @@ class ExecTool(Tool):
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
-            # Block writes to nanobot internal state files (#2989).
-            # history.jsonl / .dream_cursor are managed by append_history();
-            # direct writes corrupt the cursor format and crash /dream.
+            # 禁止写入 nanobot 内部状态文件（#2989）。
+            # history.jsonl / .dream_cursor 由 append_history() 维护；
+            # 直接写入会破坏游标格式并导致 /dream 崩溃。
             r">>?\s*\S*(?:history\.jsonl|\.dream_cursor)",            # > / >> redirect
             r"\btee\b[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",     # tee / tee -a
             r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",  # cp/mv target
@@ -102,11 +102,11 @@ class ExecTool(Tool):
     ) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
 
-        # Prevent an LLM-supplied working_dir from escaping the configured
-        # workspace when restrict_to_workspace is enabled (#2826). Without
-        # this, a caller can pass working_dir="/etc" and then all absolute
-        # paths under /etc would pass the _guard_command check that anchors
-        # on cwd.
+        # 防止 LLM 提供的 working_dir 逃逸出已配置的
+        # 工作区边界（restrict_to_workspace 开启时，#2826）。若不限制
+        # 调用方可传 working_dir="/etc"，随后所有位于 /etc 下的绝对路径
+        # 都会绕过基于 cwd 的 _guard_command 检查
+        # 。
         if self.restrict_to_workspace and self.working_dir:
             try:
                 requested = Path(cwd).expanduser().resolve()
@@ -187,7 +187,7 @@ class ExecTool(Tool):
     async def _spawn(
         command: str, cwd: str, env: dict[str, str],
     ) -> asyncio.subprocess.Process:
-        """Launch *command* in a platform-appropriate shell."""
+        """在适配当前平台的 shell 中启动 *command*。"""
         if _IS_WINDOWS:
             comspec = env.get("COMSPEC", os.environ.get("COMSPEC", "cmd.exe"))
             return await asyncio.create_subprocess_exec(
@@ -208,7 +208,7 @@ class ExecTool(Tool):
 
     @staticmethod
     async def _kill_process(process: asyncio.subprocess.Process) -> None:
-        """Kill a subprocess and reap it to prevent zombies."""
+        """终止子进程并回收，避免僵尸进程。"""
         process.kill()
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
@@ -222,7 +222,7 @@ class ExecTool(Tool):
                     logger.debug("Process already reaped or not found: {}", e)
 
     def _build_env(self) -> dict[str, str]:
-        """Build a minimal environment for subprocess execution.
+        """为子进程执行构建最小环境变量。
 
         On Unix, only HOME/LANG/TERM are passed; ``bash -l`` sources the
         user's profile which sets PATH and other essentials.
@@ -268,7 +268,7 @@ class ExecTool(Tool):
         return env
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
-        """Best-effort safety guard for potentially destructive commands."""
+        """针对潜在破坏性命令的尽力安全防护。"""
         cmd = command.strip()
         lower = cmd.lower()
 
@@ -310,8 +310,8 @@ class ExecTool(Tool):
 
     @staticmethod
     def _extract_absolute_paths(command: str) -> list[str]:
-        # Windows: match drive-root paths like `C:\` as well as `C:\path\to\file`
-        # NOTE: `*` is required so `C:\` (nothing after the slash) is still extracted.
+        # Windows：匹配 `C:\` 这类盘符根路径，也匹配 `C:\path\to\file`
+        # 注意：这里需要 `*`，否则 `C:\`（斜杠后无内容）无法被提取。
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]*", command)
         posix_paths = re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command) # POSIX: /absolute only
         home_paths = re.findall(r"(?:^|[\s|>'\"])(~[^\s\"'>;|<]*)", command) # POSIX/Windows home shortcut: ~

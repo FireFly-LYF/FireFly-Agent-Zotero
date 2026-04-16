@@ -1,23 +1,23 @@
-# Long-term Memory
+# 长期记忆
 
-This file stores important information that should persist across sessions.
+本文件用于存储应在多个会话间持续保留的重要信息。
 
-## User Information
+## 用户信息
 
-(Important facts about the user)
+（关于用户的重要事实）
 
-## Preferences
+## 偏好
 
-(User preferences learned over time)
+（随时间学习到的用户偏好）
 
-## Project Context
+## 项目上下文
 
-(Information about ongoing projects)
+（进行中项目的相关信息）
 
-## Important Notes
+## 重要备注
 
-(Things to remember)
+（需要记住的事项）
 
 ---
 
-*This file is automatically updated by nanobot when important information should be remembered.*
+*当有需要长期记住的重要信息时，nanobot 会自动更新本文件。*

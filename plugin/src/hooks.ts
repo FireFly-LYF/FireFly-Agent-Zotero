@@ -9,6 +9,7 @@ import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { registerLLMItemPaneSection } from "./modules/itemPaneLLMUI";
+import { isBridgeHealthy } from "./modules/nanobotBridge";
 
 /**
  * hooks.ts 的职责：
@@ -55,11 +56,18 @@ async function onStartup() {
 
   // 7) registerLLMItemPaneSection:
   // 注册独立的 LLM Item Pane 页面模块（当前仅实现 UI，不包含具体对话功能）。
+  // 清理模板示例页，避免出现与 LLM 无关的“未知插件页”。
+  try {
+    Zotero.ItemPaneManager.unregisterSection("example");
+  } catch (_e) {}
+  try {
+    Zotero.ItemPaneManager.unregisterSection("reader-example");
+  } catch (_e) {}
   registerLLMItemPaneSection();
+  const bridgeReady = await isBridgeHealthy();
+  ztoolkit.log("[nanobotBridge] startup check:", bridgeReady ? "ready" : "offline");
 
-  // 8) registerReaderItemPaneSection: 
-  // 注册阅读器专用 Item Pane 示例区块。
-  UIExampleFactory.registerReaderItemPaneSection();
+  // 8) 关闭模板示例区块注册，仅保留 LLM 页面。
 
   // 对当前所有已打开的主窗口并发执行 onMainWindowLoad，并等待全部完成。
   // 语法说明：
@@ -81,26 +89,6 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
   win.MozXULElement.insertFTLIfNeeded(
     `${addon.data.config.addonRef}-mainWindow.ftl`,
   );
-
-  // 右下角弹窗（ProgressWindow）：这是你提到的“每次重载插件都会弹”的提示窗。
-  // 如果你不想每次弹出，直接删除/注释这一段即可。
-  const popupWin = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-    closeOnClick: true,
-    closeTime: -1,
-  })
-    .createLine({
-      text: getString("startup-begin"),
-      type: "default",
-      progress: 0,
-    })
-    .show();
-
-  await Zotero.Promise.delay(1000);
-  // 更新进度与文案（示例）
-  popupWin.changeLine({
-    progress: 30,
-    text: `[30%] ${getString("startup-begin")}`,
-  });
 
   // ===== 以下均为“模板示例”注册逻辑（样式/菜单/Prompt 等）=====
   // 1) registerStyleSheet: 
@@ -129,16 +117,6 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
   // 7) registerConditionalCommandExample: 注册一个带 when 条件的 Prompt 命令，仅在有选中条目时显示。
   PromptExampleFactory.registerConditionalCommandExample();
-
-  await Zotero.Promise.delay(1000);
-
-  // 最终完成提示（示例）
-  popupWin.changeLine({
-    progress: 100,
-    text: `[100%] ${getString("startup-finish")}`,
-  });
-  // 5 秒后自动关闭右下角弹窗（示例）
-  popupWin.startCloseTimer(5000);
 
   // 模板示例：每次启动弹出 “Helper Examples” 对话框。
   // 你若不想每次启动都弹，保持注释/删除即可。

@@ -1,4 +1,4 @@
-"""File system tools: read, write, edit, list."""
+"""文件系统工具：读、写、编辑、列目录。"""
 
 import difflib
 import mimetypes
@@ -19,7 +19,7 @@ def _resolve_path(
     allowed_dir: Path | None = None,
     extra_allowed_dirs: list[Path] | None = None,
 ) -> Path:
-    """Resolve path against workspace (if relative) and enforce directory restriction."""
+    """将路径解析到工作区（若为相对路径）并执行目录访问限制。"""
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
@@ -41,7 +41,7 @@ def _is_under(path: Path, directory: Path) -> bool:
 
 
 class _FsTool(Tool):
-    """Shared base for filesystem tools — common init and path resolution."""
+    """文件系统工具共享基类——统一初始化与路径解析。"""
 
     def __init__(
         self,
@@ -58,7 +58,7 @@ class _FsTool(Tool):
 
 
 # ---------------------------------------------------------------------------
-# read_file
+# 读取文件
 # ---------------------------------------------------------------------------
 
 
@@ -71,7 +71,7 @@ _BLOCKED_DEVICE_PATHS = frozenset({
 
 
 def _is_blocked_device(path: str | Path) -> bool:
-    """Check if path is a blocked device that could hang or produce infinite output."""
+    """检查路径是否为被禁设备（可能卡住或产生无限输出）。"""
     import re
     raw = str(path)
     if raw in _BLOCKED_DEVICE_PATHS:
@@ -82,7 +82,7 @@ def _is_blocked_device(path: str | Path) -> bool:
 
 
 def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
-    """Parse a page range like '2-5' into 0-based (start, end) inclusive."""
+    """将如 '2-5' 的页码区间解析为从 0 开始且含端点的 (start, end)。"""
     parts = pages.strip().split("-")
     if len(parts) == 1:
         p = int(parts[0])
@@ -110,7 +110,7 @@ def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
     )
 )
 class ReadFileTool(_FsTool):
-    """Read file contents with optional line-based pagination."""
+    """读取文件内容，支持按行分页。"""
 
     _MAX_CHARS = 128_000
     _DEFAULT_LIMIT = 2000
@@ -139,7 +139,7 @@ class ReadFileTool(_FsTool):
             if not path:
                 return "Error reading file: Unknown path"
 
-            # Device path blacklist
+            # 设备路径黑名单
             if _is_blocked_device(path):
                 return f"Error: Reading {path} is blocked (device path that could hang or produce infinite output)."
 
@@ -151,7 +151,7 @@ class ReadFileTool(_FsTool):
             if not fp.is_file():
                 return f"Error: Not a file: {path}"
 
-            # PDF support
+            # PDF 支持
             if fp.suffix.lower() == ".pdf":
                 return self._read_pdf(fp, pages)
 
@@ -163,7 +163,7 @@ class ReadFileTool(_FsTool):
             if mime and mime.startswith("image/"):
                 return build_image_content_blocks(raw, mime, str(fp), f"(Image file: {path})")
 
-            # Read dedup: same path + offset + limit + unchanged mtime → stub
+            # 读取去重：路径+offset+limit 相同且 mtime 未变 -> 返回占位结果
             if file_state.is_unchanged(fp, offset=offset, limit=limit):
                 return f"[File unchanged since last read: {path}]"
 
@@ -254,7 +254,7 @@ class ReadFileTool(_FsTool):
 
 
 # ---------------------------------------------------------------------------
-# write_file
+# 写入文件
 # ---------------------------------------------------------------------------
 
 
@@ -266,7 +266,7 @@ class ReadFileTool(_FsTool):
     )
 )
 class WriteFileTool(_FsTool):
-    """Write content to a file."""
+    """将内容写入文件。"""
 
     @property
     def name(self) -> str:
@@ -298,7 +298,7 @@ class WriteFileTool(_FsTool):
 
 
 # ---------------------------------------------------------------------------
-# edit_file
+# 编辑文件
 # ---------------------------------------------------------------------------
 
 _QUOTE_TABLE = str.maketrans({
@@ -342,7 +342,7 @@ def _curly_single_quotes(text: str) -> str:
 
 
 def _preserve_quote_style(old_text: str, actual_text: str, new_text: str) -> str:
-    """Preserve curly quote style when a quote-normalized fallback matched."""
+    """当命中引号归一化回退时，保留弯引号风格。"""
     if _normalize_quotes(old_text.strip()) != _normalize_quotes(actual_text.strip()) or old_text == actual_text:
         return new_text
 
@@ -359,7 +359,7 @@ def _leading_ws(line: str) -> str:
 
 
 def _reindent_like_match(old_text: str, actual_text: str, new_text: str) -> str:
-    """Preserve the outer indentation from the actual matched block."""
+    """保留实际匹配代码块的外层缩进。"""
     old_lines = old_text.split("\n")
     actual_lines = actual_text.split("\n")
     if len(old_lines) != len(actual_lines):
@@ -491,7 +491,7 @@ def _find_quote_matches(content: str, old_text: str) -> list[_MatchSpan]:
 
 
 def _find_matches(content: str, old_text: str) -> list[_MatchSpan]:
-    """Locate all matches using progressively looser strategies."""
+    """使用逐步放宽策略定位全部匹配项。"""
     for matcher in (
         lambda: _find_exact_matches(content, old_text),
         lambda: _find_trim_matches(content, old_text),
@@ -505,7 +505,7 @@ def _find_matches(content: str, old_text: str) -> list[_MatchSpan]:
 
 
 def _find_match_line_numbers(content: str, old_text: str) -> list[int]:
-    """Return 1-based starting line numbers for the current matching strategies."""
+    """返回当前匹配策略下以 1 开始的起始行号。"""
     return [match.line for match in _find_matches(content, old_text)]
 
 
@@ -514,7 +514,7 @@ def _collapse_internal_whitespace(text: str) -> str:
 
 
 def _diagnose_near_match(old_text: str, actual_text: str) -> list[str]:
-    """Return actionable hints describing why text was close but not exact."""
+    """返回可操作提示，说明文本为何接近但不精确匹配。"""
     hints: list[str] = []
 
     if old_text.lower() == actual_text.lower() and old_text != actual_text:
@@ -530,7 +530,7 @@ def _diagnose_near_match(old_text: str, actual_text: str) -> list[str]:
 
 
 def _best_window(old_text: str, content: str) -> tuple[float, int, list[str], list[str]]:
-    """Find the closest line-window match and return ratio/start/snippet/hints."""
+    """查找最接近的行窗口匹配并返回相似度/起始行/片段/提示。"""
     lines = content.splitlines(keepends=True)
     old_lines = old_text.splitlines(keepends=True)
     window = max(1, len(old_lines))
@@ -551,7 +551,7 @@ def _best_window(old_text: str, content: str) -> tuple[float, int, list[str], li
 
 
 def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
-    """Locate old_text in content with a multi-level fallback chain:
+    """在内容中通过多级回退链定位 old_text：
 
     1. Exact substring match
     2. Line-trimmed sliding window (handles indentation differences)
@@ -576,7 +576,7 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
     )
 )
 class EditFileTool(_FsTool):
-    """Edit a file by replacing text with fallback matching."""
+    """通过回退匹配替换文本来编辑文件。"""
 
     _MAX_EDIT_FILE_SIZE = 1024 * 1024 * 1024  # 1 GiB
     _MARKDOWN_EXTS = frozenset({".md", ".mdx", ".markdown"})
@@ -596,7 +596,7 @@ class EditFileTool(_FsTool):
 
     @staticmethod
     def _strip_trailing_ws(text: str) -> str:
-        """Strip trailing whitespace from each line."""
+        """去除每行行尾空白。"""
         return "\n".join(line.rstrip() for line in text.split("\n"))
 
     async def execute(
@@ -618,7 +618,7 @@ class EditFileTool(_FsTool):
 
             fp = self._resolve(path)
 
-            # Create-file semantics: old_text='' + file doesn't exist → create
+            # 创建文件语义：old_text='' 且文件不存在 -> 创建
             if not fp.exists():
                 if old_text == "":
                     fp.parent.mkdir(parents=True, exist_ok=True)
@@ -627,7 +627,7 @@ class EditFileTool(_FsTool):
                     return f"Successfully created {fp}"
                 return self._file_not_found_msg(path, fp)
 
-            # File size protection
+            # 文件大小保护
             try:
                 fsize = fp.stat().st_size
             except OSError:
@@ -635,7 +635,7 @@ class EditFileTool(_FsTool):
             if fsize > self._MAX_EDIT_FILE_SIZE:
                 return f"Error: File too large to edit ({fsize / (1024**3):.1f} GiB). Maximum is 1 GiB."
 
-            # Create-file: old_text='' but file exists and not empty → reject
+            # 创建文件：old_text='' 但文件已存在且非空 -> 拒绝
             if old_text == "":
                 raw = fp.read_bytes()
                 content = raw.decode("utf-8")
@@ -645,7 +645,7 @@ class EditFileTool(_FsTool):
                 file_state.record_write(fp)
                 return f"Successfully edited {fp}"
 
-            # Read-before-edit check
+            # 编辑前读取检查
             warning = file_state.check_read(fp)
 
             raw = fp.read_bytes()
@@ -670,7 +670,7 @@ class EditFileTool(_FsTool):
 
             norm_new = new_text.replace("\r\n", "\n")
 
-            # Trailing whitespace stripping (skip markdown to preserve double-space line breaks)
+            # 行尾空白清理（Markdown 跳过，保留双空格换行语义）
             if fp.suffix.lower() not in self._MARKDOWN_EXTS:
                 norm_new = self._strip_trailing_ws(norm_new)
 
@@ -680,8 +680,8 @@ class EditFileTool(_FsTool):
                 replacement = _preserve_quote_style(norm_old, match.text, norm_new)
                 replacement = _reindent_like_match(norm_old, match.text, replacement)
 
-                # Delete-line cleanup: when deleting text (new_text=''), consume trailing
-                # newline to avoid leaving a blank line
+                # 删除行清理：当删除文本（new_text=''）时，吞并后续
+                # 换行，避免残留空白行
                 end = match.end
                 if replacement == "" and not match.text.endswith("\n") and content[end:end + 1] == "\n":
                     end += 1
@@ -702,7 +702,7 @@ class EditFileTool(_FsTool):
             return f"Error editing file: {e}"
 
     def _file_not_found_msg(self, path: str, fp: Path) -> str:
-        """Build an error message with 'Did you mean ...?' suggestions."""
+        """构建带有“Did you mean ...?”建议的错误信息。"""
         parent = fp.parent
         suggestions: list[str] = []
         if parent.is_dir():
@@ -743,7 +743,7 @@ class EditFileTool(_FsTool):
 
 
 # ---------------------------------------------------------------------------
-# list_dir
+# 列出目录
 # ---------------------------------------------------------------------------
 
 @tool_parameters(
@@ -759,7 +759,7 @@ class EditFileTool(_FsTool):
     )
 )
 class ListDirTool(_FsTool):
-    """List directory contents with optional recursion."""
+    """列出目录内容，可选递归。"""
 
     _DEFAULT_MAX = 200
     _IGNORE_DIRS = {

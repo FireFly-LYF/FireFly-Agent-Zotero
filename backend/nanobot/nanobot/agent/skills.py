@@ -1,4 +1,4 @@
-"""Skills loader for agent capabilities."""
+"""用于加载 Agent 能力技能的模块。"""
 
 import json
 import os
@@ -6,10 +6,10 @@ import re
 import shutil
 from pathlib import Path
 
-# Default builtin skills directory (relative to this file)
+# 默认内置技能目录（相对当前文件）
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
-# Opening ---, YAML body (group 1), closing --- on its own line; supports CRLF.
+# 匹配开头 ---, YAML 主体（分组 1）, 以及独立一行的结尾 ---；支持 CRLF。
 _STRIP_SKILL_FRONTMATTER = re.compile(
     r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?",
     re.DOTALL,
@@ -146,7 +146,7 @@ class SkillsLoader:
         return "\n".join(lines)
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:
-        """Get a description of missing requirements."""
+        """获取缺失依赖项的描述。"""
         requires = skill_meta.get("requires", {})
         required_bins = requires.get("bins", [])
         required_env_vars = requires.get("env", [])
@@ -156,14 +156,14 @@ class SkillsLoader:
         )
 
     def _get_skill_description(self, name: str) -> str:
-        """Get the description of a skill from its frontmatter."""
+        """从技能 frontmatter 获取描述。"""
         meta = self.get_skill_metadata(name)
         if meta and meta.get("description"):
             return meta["description"]
         return name  # Fallback to skill name
 
     def _strip_frontmatter(self, content: str) -> str:
-        """Remove YAML frontmatter from markdown content."""
+        """从 Markdown 内容中移除 YAML frontmatter。"""
         if not content.startswith("---"):
             return content
         match = _STRIP_SKILL_FRONTMATTER.match(content)
@@ -172,7 +172,7 @@ class SkillsLoader:
         return content
 
     def _parse_nanobot_metadata(self, raw: str) -> dict:
-        """Parse skill metadata JSON from frontmatter (supports nanobot and openclaw keys)."""
+        """从 frontmatter 解析技能元数据 JSON（支持 nanobot 与 openclaw 键）。"""
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
@@ -183,7 +183,7 @@ class SkillsLoader:
         return payload if isinstance(payload, dict) else {}
 
     def _check_requirements(self, skill_meta: dict) -> bool:
-        """Check if skill requirements are met (bins, env vars)."""
+        """检查技能依赖是否满足（可执行文件、环境变量）。"""
         requires = skill_meta.get("requires", {})
         required_bins = requires.get("bins", [])
         required_env_vars = requires.get("env", [])
@@ -192,12 +192,12 @@ class SkillsLoader:
         )
 
     def _get_skill_meta(self, name: str) -> dict:
-        """Get nanobot metadata for a skill (cached in frontmatter)."""
+        """获取技能的 nanobot 元数据（缓存于 frontmatter）。"""
         meta = self.get_skill_metadata(name) or {}
         return self._parse_nanobot_metadata(meta.get("metadata", ""))
 
     def get_always_skills(self) -> list[str]:
-        """Get skills marked as always=true that meet requirements."""
+        """获取标记为 always=true 且依赖满足的技能。"""
         return [
             entry["name"]
             for entry in self.list_skills(filter_unavailable=True)

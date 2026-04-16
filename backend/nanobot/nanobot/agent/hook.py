@@ -1,4 +1,4 @@
-"""Shared lifecycle hook primitives for agent runs."""
+"""Agent 运行过程中共享的生命周期钩子原语。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 @dataclass(slots=True)
 class AgentHookContext:
-    """Mutable per-iteration state exposed to runner hooks."""
+    """暴露给 runner 钩子的、可变的逐轮状态。"""
 
     iteration: int
     messages: list[dict[str, Any]]
@@ -27,7 +27,7 @@ class AgentHookContext:
 
 
 class AgentHook:
-    """Minimal lifecycle surface for shared runner customization."""
+    """为共享 runner 定制提供的最小生命周期接口。"""
 
     def __init__(self, reraise: bool = False) -> None:
         self._reraise = reraise
@@ -55,11 +55,11 @@ class AgentHook:
 
 
 class CompositeHook(AgentHook):
-    """Fan-out hook that delegates to an ordered list of hooks.
+    """扇出钩子：按顺序委托给一组钩子。
 
-    Error isolation: async methods catch and log per-hook exceptions
-    so a faulty custom hook cannot crash the agent loop.
-    ``finalize_content`` is a pipeline (no isolation — bugs should surface).
+    错误隔离：异步方法会捕获并记录每个钩子的异常
+    从而避免有问题的自定义钩子拖垮 agent 循环。
+    `finalize_content` 是流水线（不做隔离——应暴露错误）。
     """
 
     __slots__ = ("_hooks",)

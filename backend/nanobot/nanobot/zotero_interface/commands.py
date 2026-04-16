@@ -1,6 +1,7 @@
-"""nanobot 的命令行（CLI）命令集合。"""
+"""nanobot 的zotero接口命令集合。"""
 
 import asyncio
+import json
 import os
 import select
 import signal
@@ -227,6 +228,14 @@ def _is_exit_command(command: str) -> bool:
     return command.lower() in EXIT_COMMANDS
 
 
+def _has_interactive_console() -> bool:
+    """检查当前进程是否具备可交互控制台。"""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
 async def _read_interactive_input_async() -> str:
     """使用 prompt_toolkit 读取用户输入（处理粘贴、历史、显示等）。
 
@@ -260,30 +269,6 @@ def main(
 ):
     """nanobot - 个人 AI 助手。"""
     pass
-
-
-@app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
-def zotero(ctx: typer.Context):
-    """转发到 Zotero 集成命令入口（nanobot.zotero_interface）。"""
-    from nanobot.zotero_interface.commands import app as zotero_app
-
-    forward_args = list(ctx.args)
-    if not forward_args:
-        # 便捷模式：`nanobot zotero` 直接进入 Zotero 桥接 agent。
-        forward_args = ["agent"]
-
-    try:
-        zotero_app(
-            args=forward_args,
-            prog_name="nanobot zotero",
-            standalone_mode=False,
-        )
-    except SystemExit as exc:
-        code = exc.code if isinstance(exc.code, int) else 1
-        if code != 0:
-            raise typer.Exit(code)
 
 
 # ============================================================================
@@ -897,6 +882,8 @@ def agent(
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    zotero_bridge_host: str = typer.Option("127.0.0.1", "--zotero-bridge-host", help="Zotero bridge bind host"),
+    zotero_bridge_port: int = typer.Option(8765, "--zotero-bridge-port", help="Zotero bridge bind port"),
 ):
     """直接与 agent 交互。"""
     from loguru import logger
@@ -986,8 +973,14 @@ def agent(
     else:
         # 交互模式：像其他 channel 一样通过 bus 路由
         from nanobot.bus.events import InboundMessage
-        _init_prompt_session()
-        console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+        interactive_console = _has_interactive_console()
+        if interactive_console:
+            _init_prompt_session()
+            console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+        else:
+            console.print(
+                f"{__logo__} Running in headless Zotero mode (no interactive console detected).\n"
+            )
 
         if ":" in session_id:
             cli_channel, cli_chat_id = session_id.split(":", 1)
@@ -1000,22 +993,174 @@ def agent(
             console.print(f"\nReceived {sig_name}, goodbye!")
             sys.exit(0)
 
-        signal.signal(signal.SIGINT, _handle_signal)
-        signal.signal(signal.SIGTERM, _handle_signal)
-        # Windows 不支持 SIGHUP
-        if hasattr(signal, 'SIGHUP'):
-            signal.signal(signal.SIGHUP, _handle_signal)
-        # 忽略 SIGPIPE：避免写入已关闭的管道时进程静默退出
-        # Windows 不支持 SIGPIPE
-        if hasattr(signal, 'SIGPIPE'):
-            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        if interactive_console:
+            signal.signal(signal.SIGINT, _handle_signal)
+            signal.signal(signal.SIGTERM, _handle_signal)
+            # Windows 不支持 SIGHUP
+            if hasattr(signal, 'SIGHUP'):
+                signal.signal(signal.SIGHUP, _handle_signal)
+            # 忽略 SIGPIPE：避免写入已关闭的管道时进程静默退出
+            # Windows 不支持 SIGPIPE
+            if hasattr(signal, 'SIGPIPE'):
+                signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive():
+            from aiohttp import web
+
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
             turn_response: list[tuple[str, dict]] = []
             renderer: StreamRenderer | None = None
+            inbound_from_zotero: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+            stream_subscribers: dict[str, set[asyncio.Queue[dict[str, str]]]] = {}
+
+            def _inject_zotero_item_context(content: str, source_session: str) -> str:
+                """
+                当 session_id 形如 "zotero:item-12345" 时，为用户消息注入当前条目上下文。
+
+                这能让 agent 在 Zotero 面板会话里自动定位当前文献，而不要求用户手动给
+                --item-id / --item-key 参数。
+                """
+                if not content:
+                    return content
+
+                if ":" in source_session:
+                    channel, chat_id = source_session.split(":", 1)
+                else:
+                    channel, chat_id = "cli", source_session
+
+                if channel != "zotero" or not chat_id.startswith("item-"):
+                    return content
+
+                raw_item_id = chat_id[len("item-") :].strip()
+                if not raw_item_id.isdigit():
+                    return content
+
+                marker = f"[zotero_current_item_id={raw_item_id}]"
+                if marker in content:
+                    return content
+
+                guidance = (
+                    f"{marker}\n"
+                    f"当前 Zotero 条目 item_id 为 {raw_item_id}。"
+                    "若用户未显式指定其他文献，请优先基于该条目读取与分析。"
+                )
+                return f"{guidance}\n\n{content}"
+
+            def _stream_subscribe(chat_id: str) -> asyncio.Queue[dict[str, str]]:
+                queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+                stream_subscribers.setdefault(chat_id, set()).add(queue)
+                return queue
+
+            def _stream_unsubscribe(chat_id: str, queue: asyncio.Queue[dict[str, str]]) -> None:
+                members = stream_subscribers.get(chat_id)
+                if not members:
+                    return
+                members.discard(queue)
+                if not members:
+                    stream_subscribers.pop(chat_id, None)
+
+            async def _stream_publish(chat_id: str, payload: dict[str, str]) -> None:
+                members = stream_subscribers.get(chat_id)
+                if not members:
+                    return
+                for q in list(members):
+                    await q.put(payload)
+
+            async def _start_zotero_bridge():
+                async def _health(_request: web.Request) -> web.Response:
+                    return web.json_response({"status": "ok"})
+
+                async def _ingest(request: web.Request) -> web.Response:
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+                    content = str((body or {}).get("message", "")).strip()
+                    if not content:
+                        return web.json_response({"ok": False, "error": "message is required"}, status=400)
+
+                    override = str((body or {}).get("session_id", "")).strip()
+                    patched = _inject_zotero_item_context(content, override or session_id)
+                    await inbound_from_zotero.put({
+                        "message": patched,
+                        "session_id": override,
+                    })
+                    return web.json_response({"ok": True})
+
+                async def _stream_chat(request: web.Request) -> web.StreamResponse:
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+                    content = str((body or {}).get("message", "")).strip()
+                    if not content:
+                        return web.json_response({"ok": False, "error": "message is required"}, status=400)
+
+                    source_session = str((body or {}).get("session_id", "")).strip() or session_id
+                    if ":" in source_session:
+                        current_channel, current_chat_id = source_session.split(":", 1)
+                    else:
+                        current_channel, current_chat_id = "cli", source_session
+                    patched_content = _inject_zotero_item_context(content, source_session)
+
+                    subscriber = _stream_subscribe(current_chat_id)
+                    response = web.StreamResponse(
+                        status=200,
+                        headers={
+                            "Content-Type": "text/event-stream; charset=utf-8",
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                        },
+                    )
+                    await response.prepare(request)
+
+                    async def _write_event(event: dict[str, str]) -> None:
+                        packet = f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+                        await response.write(packet)
+
+                    from nanobot.bus.events import InboundMessage
+                    await bus.publish_inbound(InboundMessage(
+                        channel=current_channel,
+                        sender_id="user",
+                        chat_id=current_chat_id,
+                        content=patched_content,
+                        metadata={"_wants_stream": True, "_source": "zotero_stream"},
+                    ))
+
+                    try:
+                        await _write_event({"type": "start"})
+                        while True:
+                            event = await asyncio.wait_for(subscriber.get(), timeout=120.0)
+                            await _write_event(event)
+                            if event.get("type") in {"end", "final", "error"}:
+                                break
+                    except asyncio.TimeoutError:
+                        await _write_event({"type": "error", "message": "stream timeout"})
+                    finally:
+                        _stream_unsubscribe(current_chat_id, subscriber)
+                        await response.write_eof()
+                    return response
+
+                app = web.Application()
+                app.router.add_get("/health", _health)
+                app.router.add_post("/zotero/message", _ingest)
+                app.router.add_post("/zotero/stream", _stream_chat)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, zotero_bridge_host, zotero_bridge_port)
+                await site.start()
+                return runner
+
+            bridge_runner = await _start_zotero_bridge()
+            console.print(
+                f"[green]✓[/green] Zotero bridge listening on "
+                f"http://{zotero_bridge_host}:{zotero_bridge_port}/zotero/message"
+            )
+            console.print("[dim]POST JSON: {\"message\": \"...\", \"session_id\": \"optional\"}[/dim]")
 
             async def _consume_outbound():
                 while True:
@@ -1023,10 +1168,12 @@ def agent(
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
 
                         if msg.metadata.get("_stream_delta"):
+                            await _stream_publish(msg.chat_id, {"type": "delta", "delta": msg.content})
                             if renderer:
                                 await renderer.on_delta(msg.content)
                             continue
                         if msg.metadata.get("_stream_end"):
+                            await _stream_publish(msg.chat_id, {"type": "end"})
                             if renderer:
                                 await renderer.on_end(
                                     resuming=msg.metadata.get("_resuming", False),
@@ -1050,8 +1197,10 @@ def agent(
                         if not turn_done.is_set():
                             if msg.content:
                                 turn_response.append((msg.content, dict(msg.metadata or {})))
+                                await _stream_publish(msg.chat_id, {"type": "final", "content": msg.content})
                             turn_done.set()
                         elif msg.content:
+                            await _stream_publish(msg.chat_id, {"type": "final", "content": msg.content})
                             await _print_interactive_response(
                                 msg.content,
                                 render_markdown=markdown,
@@ -1068,16 +1217,42 @@ def agent(
             try:
                 while True:
                     try:
-                        _flush_pending_tty_input()
-                        # 等待用户输入前停止 spinner，避免与 prompt_toolkit 冲突
-                        if renderer:
-                            renderer.stop_for_input()
-                        user_input = await _read_interactive_input_async()
+                        source = "zotero"
+                        source_session = session_id
+                        if interactive_console:
+                            _flush_pending_tty_input()
+                            # 等待用户输入前停止 spinner，避免与 prompt_toolkit 冲突
+                            if renderer:
+                                renderer.stop_for_input()
+
+                            input_task = asyncio.create_task(_read_interactive_input_async())
+                            zotero_task = asyncio.create_task(inbound_from_zotero.get())
+                            done, pending = await asyncio.wait(
+                                {input_task, zotero_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for task in pending:
+                                task.cancel()
+                            await asyncio.gather(*pending, return_exceptions=True)
+
+                            source = "cli"
+                            if zotero_task in done:
+                                payload = zotero_task.result()
+                                user_input = payload["message"]
+                                source = "zotero"
+                                source_session = payload.get("session_id") or session_id
+                                await _print_interactive_line(f"[Zotero] {user_input}")
+                            else:
+                                user_input = input_task.result()
+                        else:
+                            payload = await inbound_from_zotero.get()
+                            user_input = payload["message"]
+                            source_session = payload.get("session_id") or session_id
                         command = user_input.strip()
                         if not command:
                             continue
 
-                        if _is_exit_command(command):
+                        if interactive_console and _is_exit_command(command):
                             _restore_terminal()
                             console.print("\nGoodbye!")
                             break
@@ -1086,12 +1261,18 @@ def agent(
                         turn_response.clear()
                         renderer = StreamRenderer(render_markdown=markdown)
 
+                        if ":" in source_session:
+                            current_channel, current_chat_id = source_session.split(":", 1)
+                        else:
+                            current_channel, current_chat_id = "cli", source_session
+                        patched_command = _inject_zotero_item_context(command, source_session)
+
                         await bus.publish_inbound(InboundMessage(
-                            channel=cli_channel,
+                            channel=current_channel,
                             sender_id="user",
-                            chat_id=cli_chat_id,
-                            content=user_input,
-                            metadata={"_wants_stream": True},
+                            chat_id=current_chat_id,
+                            content=patched_command,
+                            metadata={"_wants_stream": True, "_source": source},
                         ))
 
                         await turn_done.wait()
@@ -1119,6 +1300,8 @@ def agent(
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
                 await agent_loop.close_mcp()
+                if bridge_runner is not None:
+                    await bridge_runner.cleanup()
 
         asyncio.run(run_interactive())
 
