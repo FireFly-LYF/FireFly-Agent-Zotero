@@ -62,6 +62,7 @@ async def iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], N
 async def consume_sse(
     response: httpx.Response,
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+    on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolCallRequest], str]:
     """Consume a Responses API SSE stream into ``(content, tool_calls, finish_reason)``."""
     content = ""
@@ -87,6 +88,10 @@ async def consume_sse(
             content += delta_text
             if on_content_delta and delta_text:
                 await on_content_delta(delta_text)
+        elif "reasoning" in str(event_type or "") and "delta" in str(event_type or ""):
+            delta_text = str(event.get("delta") or event.get("text") or "")
+            if on_reasoning_delta and delta_text:
+                await on_reasoning_delta(delta_text)
         elif event_type == "response.function_call_arguments.delta":
             call_id = event.get("call_id")
             if call_id and call_id in tool_call_buffers:
@@ -210,6 +215,7 @@ def parse_response_output(response: Any) -> LLMResponse:
 async def consume_sdk_stream(
     stream: Any,
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+    on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int], str | None]:
     """Consume an SDK async stream from ``client.responses.create(stream=True)``."""
     content = ""
@@ -237,6 +243,10 @@ async def consume_sdk_stream(
             content += delta_text
             if on_content_delta and delta_text:
                 await on_content_delta(delta_text)
+        elif "reasoning" in str(event_type or "") and "delta" in str(event_type or ""):
+            delta_text = str(getattr(event, "delta", None) or getattr(event, "text", None) or "")
+            if on_reasoning_delta and delta_text:
+                await on_reasoning_delta(delta_text)
         elif event_type == "response.function_call_arguments.delta":
             call_id = getattr(event, "call_id", None)
             if call_id and call_id in tool_call_buffers:

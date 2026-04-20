@@ -12,6 +12,7 @@ plugin/logs/
 backend/nanobot/.venv/
 backend/nanobot/venv/
 backend/nanobot/.pytest_cache/
+backend/workspace/sessions/
 
 # Environment & secrets
 .env

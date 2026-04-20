@@ -1014,6 +1014,7 @@ def agent(
             renderer: StreamRenderer | None = None
             inbound_from_zotero: asyncio.Queue[dict[str, str]] = asyncio.Queue()
             stream_subscribers: dict[str, set[asyncio.Queue[dict[str, str]]]] = {}
+            zotero_chat_session_ids = tuple(f"zotero:chat-{idx}" for idx in range(1, 5))
 
             def _inject_zotero_item_context(content: str, source_session: str) -> str:
                 """
@@ -1069,8 +1070,60 @@ def agent(
                     await q.put(payload)
 
             async def _start_zotero_bridge():
+                def _serialize_session_messages(session_key: str) -> list[dict[str, str]]:
+                    session = agent_loop.sessions.get_or_create(session_key)
+                    out: list[dict[str, str]] = []
+                    for msg in session.messages:
+                        role = str(msg.get("role", ""))
+                        if role not in {"user", "assistant"}:
+                            continue
+                        content = str(msg.get("content", "") or "")
+                        reasoning = str(msg.get("reasoning_content", "") or "")
+                        out.append({
+                            "role": role,
+                            "content": content,
+                            "reasoning_content": reasoning,
+                        })
+                    return out
+
                 async def _health(_request: web.Request) -> web.Response:
                     return web.json_response({"status": "ok"})
+
+                async def _history(request: web.Request) -> web.Response:
+                    session_arg = str(request.query.get("session_id", "")).strip()
+                    if session_arg:
+                        target_sessions = [session_arg]
+                    else:
+                        target_sessions = list(zotero_chat_session_ids)
+                    legacy_listing = agent_loop.sessions.list_sessions()
+                    resolved_sessions: dict[str, str] = {}
+                    for sid in target_sessions:
+                        resolved = sid
+                        if sid.startswith("zotero:chat-"):
+                            suffix = sid.split("zotero:chat-", 1)[-1]
+                            current_messages = _serialize_session_messages(sid)
+                            if not current_messages and suffix.isdigit():
+                                legacy_candidates = [
+                                    row
+                                    for row in legacy_listing
+                                    if str(row.get("key", "")).startswith("zotero:item-")
+                                    and str(row.get("key", "")).endswith(f"-chat-{suffix}")
+                                ]
+                                if legacy_candidates:
+                                    legacy_candidates.sort(
+                                        key=lambda row: str(row.get("updated_at", "")),
+                                        reverse=True,
+                                    )
+                                    resolved = str(legacy_candidates[0].get("key") or sid)
+                        resolved_sessions[sid] = resolved
+                    payload = {
+                        "ok": True,
+                        "sessions": {
+                            sid: _serialize_session_messages(resolved_sessions.get(sid, sid))
+                            for sid in target_sessions
+                        },
+                    }
+                    return web.json_response(payload)
 
                 async def _ingest(request: web.Request) -> web.Response:
                     try:
@@ -1099,6 +1152,8 @@ def agent(
                     content = str((body or {}).get("message", "")).strip()
                     if not content:
                         return web.json_response({"ok": False, "error": "message is required"}, status=400)
+                    raw_thinking_state = str((body or {}).get("thinking_state", "Enable")).strip().lower()
+                    thinking_state = "Disable" if raw_thinking_state == "disable" else "Enable"
 
                     source_session = str((body or {}).get("session_id", "")).strip() or session_id
                     if ":" in source_session:
@@ -1128,7 +1183,11 @@ def agent(
                         sender_id="user",
                         chat_id=current_chat_id,
                         content=patched_content,
-                        metadata={"_wants_stream": True, "_source": "zotero_stream"},
+                        metadata={
+                            "_wants_stream": True,
+                            "_source": "zotero_stream",
+                            "_thinking_state": thinking_state,
+                        },
                     ))
 
                     try:
@@ -1136,7 +1195,9 @@ def agent(
                         while True:
                             event = await asyncio.wait_for(subscriber.get(), timeout=120.0)
                             await _write_event(event)
-                            if event.get("type") in {"end", "final", "error"}:
+                            # "end" 仅表示一个流片段结束（可能随后还有最终 final）
+                            # 仅在 final/error 时关闭 SSE，避免丢失 thinking/最终正文。
+                            if event.get("type") in {"final", "error"}:
                                 break
                     except asyncio.TimeoutError:
                         await _write_event({"type": "error", "message": "stream timeout"})
@@ -1147,6 +1208,7 @@ def agent(
 
                 app = web.Application()
                 app.router.add_get("/health", _health)
+                app.router.add_get("/zotero/history", _history)
                 app.router.add_post("/zotero/message", _ingest)
                 app.router.add_post("/zotero/stream", _stream_chat)
                 runner = web.AppRunner(app)
@@ -1160,7 +1222,10 @@ def agent(
                 f"[green]✓[/green] Zotero bridge listening on "
                 f"http://{zotero_bridge_host}:{zotero_bridge_port}/zotero/message"
             )
-            console.print("[dim]POST JSON: {\"message\": \"...\", \"session_id\": \"optional\"}[/dim]")
+            console.print(
+                "[dim]POST JSON: {\"message\": \"...\", \"session_id\": \"optional\", "
+                "\"thinking_state\": \"Enable\"|\"Disable\"}[/dim]",
+            )
 
             async def _consume_outbound():
                 while True:
@@ -1172,6 +1237,9 @@ def agent(
                             if renderer:
                                 await renderer.on_delta(msg.content)
                             continue
+                        if msg.metadata.get("_stream_reasoning_delta"):
+                            await _stream_publish(msg.chat_id, {"type": "thinking_delta", "delta": msg.content})
+                            continue
                         if msg.metadata.get("_stream_end"):
                             await _stream_publish(msg.chat_id, {"type": "end"})
                             if renderer:
@@ -1180,6 +1248,20 @@ def agent(
                                 )
                             continue
                         if msg.metadata.get("_streamed"):
+                            if msg.content:
+                                await _stream_publish(msg.chat_id, {"type": "final", "content": msg.content})
+                                if interactive_console:
+                                    await _print_interactive_response(
+                                        msg.content,
+                                        render_markdown=markdown,
+                                        metadata=msg.metadata,
+                                    )
+                                else:
+                                    _print_agent_response(
+                                        msg.content,
+                                        render_markdown=markdown,
+                                        metadata=msg.metadata,
+                                    )
                             turn_done.set()
                             continue
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import inspect
+import json
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,7 @@ class AgentRunSpec:
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
+    on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(slots=True)
@@ -508,6 +510,11 @@ class AgentRunner:
         hook: AgentHook,
         context: AgentHookContext,
     ):
+        self._log_zotero_llm_context(
+            spec=spec,
+            iteration=context.iteration,
+            messages=messages,
+        )
         kwargs = self._build_request_kwargs(
             spec,
             messages,
@@ -520,8 +527,33 @@ class AgentRunner:
             return await self.provider.chat_stream_with_retry(
                 **kwargs,
                 on_content_delta=_stream,
+                on_reasoning_delta=spec.on_reasoning_stream,
             )
         return await self.provider.chat_with_retry(**kwargs)
+
+    @staticmethod
+    def _log_zotero_llm_context(
+        *,
+        spec: AgentRunSpec,
+        iteration: int,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """仅在 Zotero 会话打印发给 LLM 的完整上下文，便于后端调试。"""
+        session_key = str(spec.session_key or "")
+        if not session_key.startswith("zotero:"):
+            return
+        payload = {
+            "session_key": session_key,
+            "iteration": iteration,
+            "model": spec.model,
+            "message_count": len(messages),
+            "messages": messages,
+            "tool_names": spec.tools.tool_names,
+        }
+        logger.info(
+            "ZOTERO_LLM_CONTEXT\n{}",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
 
     async def _request_finalization_retry(
         self,

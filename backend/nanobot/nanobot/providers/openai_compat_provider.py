@@ -876,6 +876,7 @@ class OpenAICompatProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
         try:
@@ -902,6 +903,7 @@ class OpenAICompatProvider(LLMProvider):
                     content, tool_calls, finish_reason, usage, reasoning_content = await consume_sdk_stream(
                         _timed_stream(),
                         on_content_delta,
+                        on_reasoning_delta,
                     )
                     return LLMResponse(
                         content=content or None,
@@ -936,6 +938,12 @@ class OpenAICompatProvider(LLMProvider):
                     text = getattr(chunk.choices[0].delta, "content", None)
                     if text:
                         await on_content_delta(text)
+                if on_reasoning_delta and chunk.choices:
+                    r_text = getattr(chunk.choices[0].delta, "reasoning_content", None)
+                    if not r_text:
+                        r_text = getattr(chunk.choices[0].delta, "reasoning", None)
+                    if r_text:
+                        await on_reasoning_delta(str(r_text))
             return self._parse_chunks(chunks)
         except asyncio.TimeoutError:
             return LLMResponse(

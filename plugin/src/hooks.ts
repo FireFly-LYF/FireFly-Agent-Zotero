@@ -38,9 +38,9 @@ async function onStartup() {
   // 注册 Zotero 事件观察者（tab/item/file），用于接收通知并转发到 hooks.onNotify。
   BasicExampleFactory.registerNotifier();
 
-  // 3) registerShortcuts: 
-  // 注册示例快捷键监听（如 Shift+L / Shift+S）。
-  KeyExampleFactory.registerShortcuts();
+  // 3) registerShortcuts:
+  // 模板示例快捷键会在启动时弹出 "Example Shortcuts" 提示，这里禁用。
+  // KeyExampleFactory.registerShortcuts();
 
   // 4) registerExtraColumn: 
   // 在条目列表(ItemTree)注册一个文本扩展列。

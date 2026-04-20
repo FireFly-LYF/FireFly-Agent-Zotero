@@ -496,6 +496,7 @@ class AnthropicProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
@@ -504,17 +505,29 @@ class AnthropicProvider(LLMProvider):
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
         try:
             async with self._client.messages.stream(**kwargs) as stream:
-                if on_content_delta:
-                    stream_iter = stream.text_stream.__aiter__()
+                if on_content_delta or on_reasoning_delta:
+                    stream_iter = stream.__aiter__()
                     while True:
                         try:
-                            text = await asyncio.wait_for(
+                            event = await asyncio.wait_for(
                                 stream_iter.__anext__(),
                                 timeout=idle_timeout_s,
                             )
                         except StopAsyncIteration:
                             break
-                        await on_content_delta(text)
+                        et = getattr(event, "type", "")
+                        if et != "content_block_delta":
+                            continue
+                        delta = getattr(event, "delta", None)
+                        dt = getattr(delta, "type", "") if delta is not None else ""
+                        if dt == "text_delta":
+                            text = getattr(delta, "text", None)
+                            if on_content_delta and text:
+                                await on_content_delta(str(text))
+                        elif dt == "thinking_delta":
+                            text = getattr(delta, "thinking", None) or getattr(delta, "text", None)
+                            if on_reasoning_delta and text:
+                                await on_reasoning_delta(str(text))
                 response = await asyncio.wait_for(
                     stream.get_final_message(),
                     timeout=idle_timeout_s,

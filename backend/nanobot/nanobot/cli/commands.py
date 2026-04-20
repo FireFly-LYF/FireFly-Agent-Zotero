@@ -1033,6 +1033,20 @@ def agent(
                                 )
                             continue
                         if msg.metadata.get("_streamed"):
+                            if msg.content:
+                                await _stream_publish(msg.chat_id, {"type": "final", "content": msg.content})
+                                if interactive_console:
+                                    await _print_interactive_response(
+                                        msg.content,
+                                        render_markdown=markdown,
+                                        metadata=msg.metadata,
+                                    )
+                                else:
+                                    _print_agent_response(
+                                        msg.content,
+                                        render_markdown=markdown,
+                                        metadata=msg.metadata,
+                                    )
                             turn_done.set()
                             continue
 

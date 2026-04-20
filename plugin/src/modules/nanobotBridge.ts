@@ -3,6 +3,7 @@ const BRIDGE_PORT = 8765;
 const BRIDGE_HEALTH_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/health`;
 const BRIDGE_MESSAGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/message`;
 const BRIDGE_STREAM_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/stream`;
+const BRIDGE_HISTORY_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/history`;
 
 const HEALTH_RETRY = 40;
 const HEALTH_INTERVAL_MS = 500;
@@ -129,12 +130,15 @@ export async function sendToNanobot(message: string, sessionID = "cli:direct") {
 export async function streamFromNanobot(
   message: string,
   sessionID: string,
+  thinkingState: "Enable" | "Disable",
   onDelta: (delta: string) => void,
   onFinal?: (content: string) => void,
+  onThinkingDelta?: (delta: string) => void,
 ): Promise<void> {
   const body = JSON.stringify({
     message,
     session_id: sessionID,
+    thinking_state: thinkingState,
   });
   const res = await fetchWithTimeout(
     BRIDGE_STREAM_URL,
@@ -177,6 +181,8 @@ export async function streamFromNanobot(
           };
           if (event.type === "delta" && event.delta) {
             onDelta(event.delta);
+          } else if (event.type === "thinking_delta" && event.delta) {
+            onThinkingDelta?.(event.delta);
           } else if (event.type === "final" && event.content) {
             onFinal?.(event.content);
           } else if (event.type === "error") {
@@ -190,4 +196,34 @@ export async function streamFromNanobot(
     }
   }
 }
+
+export const fetchZoteroChatHistories = async (sessionID?: string): Promise<
+  Record<string, Array<{ role: string; content: string; reasoning_content?: string }>>
+> => {
+  const query = sessionID ? `?session_id=${encodeURIComponent(sessionID)}` : "";
+  const url = `${BRIDGE_HISTORY_URL}${query}`;
+  const tryParse = (raw: string) => {
+    const parsed = JSON.parse(raw || "{}") as {
+      sessions?: Record<string, Array<{ role: string; content: string; reasoning_content?: string }>>;
+    };
+    return parsed.sessions ?? {};
+  };
+  try {
+    const res = await zoteroHttpRequest("GET", url, { timeout: SEND_TIMEOUT_MS });
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Bridge history failed: ${res.status} ${res.responseText}`);
+    }
+    return tryParse(res.responseText);
+  } catch (_e1) {
+    const res = await fetchWithTimeout(url, { method: "GET" }, SEND_TIMEOUT_MS);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Bridge history failed: ${res.status} ${text}`);
+    }
+    const parsed = (await res.json()) as {
+      sessions?: Record<string, Array<{ role: string; content: string; reasoning_content?: string }>>;
+    };
+    return parsed.sessions ?? {};
+  }
+};
 
