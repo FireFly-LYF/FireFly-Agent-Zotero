@@ -6,6 +6,8 @@ import os
 import select
 import signal
 import sys
+import time
+import uuid
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -1012,7 +1014,7 @@ def agent(
             turn_done.set()
             turn_response: list[tuple[str, dict]] = []
             renderer: StreamRenderer | None = None
-            inbound_from_zotero: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+            inbound_from_zotero: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
             stream_subscribers: dict[str, set[asyncio.Queue[dict[str, str]]]] = {}
             zotero_chat_session_ids = tuple(f"zotero:chat-{idx}" for idx in range(1, 5))
 
@@ -1048,6 +1050,27 @@ def agent(
                     "若用户未显式指定其他文献，请优先基于该条目读取与分析。"
                 )
                 return f"{guidance}\n\n{content}"
+
+            def _cache_zotero_media(media_paths: list[str]) -> list[str]:
+                """把前端传来的图片缓存到 workspace/temp，返回可读路径列表。"""
+                if not media_paths:
+                    return []
+                temp_dir = config.workspace_path / "temp"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                cached: list[str] = []
+                for raw in media_paths:
+                    p = Path(str(raw)).expanduser()
+                    if not p.is_file():
+                        continue
+                    suffix = p.suffix or ".png"
+                    name = f"zotero-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}{suffix}"
+                    target = temp_dir / name
+                    try:
+                        target.write_bytes(p.read_bytes())
+                        cached.append(str(target))
+                    except Exception as exc:
+                        logger.warning("Cache zotero media failed: {} ({})", str(p), exc)
+                return cached
 
             def _stream_subscribe(chat_id: str) -> asyncio.Queue[dict[str, str]]:
                 queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
@@ -1136,10 +1159,16 @@ def agent(
                         return web.json_response({"ok": False, "error": "message is required"}, status=400)
 
                     override = str((body or {}).get("session_id", "")).strip()
+                    media_paths = (body or {}).get("media")
+                    if not isinstance(media_paths, list):
+                        media_paths = []
+                    media_paths = [str(p).strip() for p in media_paths if str(p).strip()]
+                    cached_media = _cache_zotero_media(media_paths)
                     patched = _inject_zotero_item_context(content, override or session_id)
                     await inbound_from_zotero.put({
                         "message": patched,
                         "session_id": override,
+                        "media": cached_media,
                     })
                     return web.json_response({"ok": True})
 
@@ -1154,6 +1183,11 @@ def agent(
                         return web.json_response({"ok": False, "error": "message is required"}, status=400)
                     raw_thinking_state = str((body or {}).get("thinking_state", "Enable")).strip().lower()
                     thinking_state = "Disable" if raw_thinking_state == "disable" else "Enable"
+                    media_paths = (body or {}).get("media")
+                    if not isinstance(media_paths, list):
+                        media_paths = []
+                    media_paths = [str(p).strip() for p in media_paths if str(p).strip()]
+                    cached_media = _cache_zotero_media(media_paths)
 
                     source_session = str((body or {}).get("session_id", "")).strip() or session_id
                     if ":" in source_session:
@@ -1183,6 +1217,7 @@ def agent(
                         sender_id="user",
                         chat_id=current_chat_id,
                         content=patched_content,
+                        media=cached_media,
                         metadata={
                             "_wants_stream": True,
                             "_source": "zotero_stream",
@@ -1323,13 +1358,16 @@ def agent(
                                 user_input = payload["message"]
                                 source = "zotero"
                                 source_session = payload.get("session_id") or session_id
+                                source_media = payload.get("media") if isinstance(payload.get("media"), list) else []
                                 await _print_interactive_line(f"[Zotero] {user_input}")
                             else:
                                 user_input = input_task.result()
+                                source_media = []
                         else:
                             payload = await inbound_from_zotero.get()
                             user_input = payload["message"]
                             source_session = payload.get("session_id") or session_id
+                            source_media = payload.get("media") if isinstance(payload.get("media"), list) else []
                         command = user_input.strip()
                         if not command:
                             continue
@@ -1354,6 +1392,7 @@ def agent(
                             sender_id="user",
                             chat_id=current_chat_id,
                             content=patched_command,
+                            media=[str(p).strip() for p in source_media if str(p).strip()],
                             metadata={"_wants_stream": True, "_source": source},
                         ))
 

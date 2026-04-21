@@ -10,6 +10,7 @@ import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { registerLLMItemPaneSection } from "./modules/itemPaneLLMUI";
 import { isBridgeHealthy } from "./modules/nanobotBridge";
+import { syncAllLibraryPDFsToWikiRawDir } from "./modules/wikiPdfSync";
 
 /**
  * hooks.ts 的职责：
@@ -66,6 +67,9 @@ async function onStartup() {
   registerLLMItemPaneSection();
   const bridgeReady = await isBridgeHealthy();
   ztoolkit.log("[nanobotBridge] startup check:", bridgeReady ? "ready" : "offline");
+  void syncAllLibraryPDFsToWikiRawDir().catch((e) => {
+    Zotero.logError(new Error(`[wiki-pdf-sync] startup sync failed: ${String(e)}`));
+  });
 
   // 8) 关闭模板示例区块注册，仅保留 LLM 页面。
 
@@ -117,6 +121,11 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
   // 7) registerConditionalCommandExample: 注册一个带 when 条件的 Prompt 命令，仅在有选中条目时显示。
   PromptExampleFactory.registerConditionalCommandExample();
+
+  // 主窗口完成后再次触发一次同步，避免启动早期环境未就绪导致首次同步被跳过。
+  void syncAllLibraryPDFsToWikiRawDir().catch((e) => {
+    Zotero.logError(new Error(`[wiki-pdf-sync] onMainWindowLoad sync failed: ${String(e)}`));
+  });
 
   // 模板示例：每次启动弹出 “Helper Examples” 对话框。
   // 你若不想每次启动都弹，保持注释/删除即可。

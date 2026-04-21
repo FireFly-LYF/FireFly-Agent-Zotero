@@ -43,13 +43,22 @@ async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
   const AC: any = (globalThis as any).AbortController;
 
   // Zotero 的运行环境在部分版本里没有 AbortController，需做兼容降级。
   if (!AC) {
+    if (externalSignal?.aborted) {
+      throw new Error("Request aborted");
+    }
     return (await Promise.race([
       fetch(url, init),
+      new Promise<Response>((_, reject) => {
+        externalSignal?.addEventListener("abort", () => reject(new Error("Request aborted")), {
+          once: true,
+        });
+      }),
       new Promise<Response>((_, reject) =>
         setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs),
       ),
@@ -57,6 +66,13 @@ async function fetchWithTimeout(
   }
 
   const controller: any = new AC();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
@@ -131,14 +147,17 @@ export async function streamFromNanobot(
   message: string,
   sessionID: string,
   thinkingState: "Enable" | "Disable",
+  mediaPaths: string[] = [],
   onDelta: (delta: string) => void,
   onFinal?: (content: string) => void,
   onThinkingDelta?: (delta: string) => void,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   const body = JSON.stringify({
     message,
     session_id: sessionID,
     thinking_state: thinkingState,
+    media: Array.isArray(mediaPaths) ? mediaPaths : [],
   });
   const res = await fetchWithTimeout(
     BRIDGE_STREAM_URL,
@@ -148,6 +167,7 @@ export async function streamFromNanobot(
       body,
     },
     SEND_TIMEOUT_MS * 4,
+    abortSignal,
   );
   if (!res.ok) {
     const text = await res.text();

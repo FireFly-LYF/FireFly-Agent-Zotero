@@ -25,7 +25,7 @@ export function registerLLMItemPaneSection() {
       l10nID: getLocaleID("item-section-example1-sidenav-tooltip"),
       icon: `chrome://${config.addonRef}/content/icons/FireFly-head.svg`,
     },
-    onRender: ({ body }) => {
+    onRender: ({ body, item }) => {
       const w = (body.ownerDocument?.defaultView ?? Zotero.getMainWindow()) as unknown as
         | Window
         | null
@@ -262,7 +262,8 @@ export function registerLLMItemPaneSection() {
       conversationArea.style.border = "1px solid var(--color-border)";
       conversationArea.style.borderRadius = "10px";
       conversationArea.style.padding = "10px";
-      conversationArea.style.overflowY = "auto";
+      // 保持滚动条槽位恒定，避免内容高度变化时“突然出现”导致视觉跳动
+      conversationArea.style.overflowY = "scroll";
       conversationArea.style.userSelect = "text";
       (conversationArea.style as any).MozUserSelect = "text";
       conversationArea.style.fontSize = "13px";
@@ -284,20 +285,43 @@ export function registerLLMItemPaneSection() {
 
         const title = ownerDoc.createElement("div");
         title.textContent = "FireFly-Agent-Zotero";
+        title.style.marginTop = "26px";
         title.style.fontSize = "24px";
         title.style.fontWeight = "700";
         title.style.lineHeight = "1.18";
         title.style.letterSpacing = "0.01em";
+        title.style.maxWidth = "fit-content";
+        title.style.marginLeft = "auto";
+        title.style.marginRight = "auto";
+        title.style.whiteSpace = "nowrap";
 
         const sub = ownerDoc.createElement("div");
         sub.textContent = "和流萤一起，探索整个Paper";
-        sub.style.marginTop = "8px";
+        sub.style.marginTop = "10px";
         sub.style.fontSize = "18px";
         sub.style.opacity = "0.52";
         sub.style.fontStyle = "italic";
         sub.style.lineHeight = "1.36";
+        sub.style.maxWidth = "fit-content";
+        sub.style.marginLeft = "auto";
+        sub.style.marginRight = "auto";
+        sub.style.whiteSpace = "nowrap";
 
-        box.append(title, sub);
+        const greeting = ownerDoc.createElement("div");
+        greeting.textContent =
+          "我曾安眠，赤染之萤自破碎的天空坠落，\n沉睡在静默的星河。\n我梦见一片焦土，一株破土而出的新蕊，\n它迎着朝阳绽放，向我低语呢喃。\n飞萤扑火，向死而生。\n我会看见，飞萤之火自无梦的长夜亮起，\n绽放在终竟的明天。";
+        greeting.style.marginTop = "100px";
+        greeting.style.width = "min(92%, 720px)";
+        greeting.style.marginLeft = "auto";
+        greeting.style.marginRight = "auto";
+        greeting.style.fontSize = "15px";
+        greeting.style.lineHeight = "1.7";
+        greeting.style.opacity = "0.62";
+        greeting.style.fontStyle = "normal";
+        greeting.style.fontWeight = "400";
+        greeting.style.whiteSpace = "pre-wrap";
+
+        box.append(title, sub, greeting);
         emptyStateEl = box;
         conversationArea.appendChild(box);
       }
@@ -313,29 +337,34 @@ export function registerLLMItemPaneSection() {
       const composeCard = ownerDoc.createElement("div");
       composeCard.style.border = "1px solid var(--color-border)";
       composeCard.style.borderRadius = "12px";
-      composeCard.style.padding = "10px";
+      composeCard.style.padding = "6px 10px 10px";
       composeCard.style.display = "flex";
       composeCard.style.flexDirection = "column";
-      composeCard.style.gap = "10px";
-      composeCard.style.background = "rgba(127, 127, 127, 0.08)";
+      composeCard.style.gap = "6px";
+      composeCard.style.background = "#ffffff";
 
       const composeMeta = ownerDoc.createElement("div");
       composeMeta.style.display = "flex";
       composeMeta.style.gap = "8px";
       composeMeta.style.justifyContent = "flex-end";
       composeMeta.style.alignItems = "center";
+      composeMeta.style.minHeight = "30px";
+      composeMeta.style.height = "30px";
+      composeMeta.style.flexWrap = "nowrap";
+      composeMeta.style.overflow = "hidden";
       composeMeta.style.fontSize = "12px";
       composeMeta.style.opacity = "0.85";
       const bridgeStatus = ownerDoc.createElement("span");
       bridgeStatus.style.display = "inline-flex";
       bridgeStatus.style.alignItems = "center";
       bridgeStatus.style.gap = "5px";
-      bridgeStatus.style.padding = "1px 7px";
+      bridgeStatus.style.padding = "0px 6px";
       bridgeStatus.style.minHeight = "24px";
       bridgeStatus.style.borderRadius = "999px";
       bridgeStatus.style.border = "1px solid rgba(120, 120, 120, 0.24)";
       bridgeStatus.style.background = "rgba(127, 127, 127, 0.08)";
       bridgeStatus.style.whiteSpace = "nowrap";
+      bridgeStatus.style.flexShrink = "0";
       const bridgeDot = ownerDoc.createElement("span");
       bridgeDot.style.width = "8px";
       bridgeDot.style.height = "8px";
@@ -350,60 +379,135 @@ export function registerLLMItemPaneSection() {
       bridgeStatusText.style.lineHeight = "1";
       bridgeStatus.append(bridgeDot, bridgeStatusText);
       const contextBar = ownerDoc.createElement("div");
-      contextBar.style.display = "none";
-      contextBar.style.flexWrap = "wrap";
+      contextBar.style.display = "flex";
+      contextBar.style.flexWrap = "nowrap";
       contextBar.style.gap = "8px";
       contextBar.style.alignItems = "center";
+      contextBar.style.flex = "1";
+      contextBar.style.minHeight = "30px";
+      contextBar.style.height = "30px";
+      contextBar.style.overflowX = "auto";
+      contextBar.style.overflowY = "hidden";
       contextBar.style.padding = "0 2px";
       contextBar.style.marginRight = "auto";
       composeMeta.append(contextBar, bridgeStatus);
 
       const TEXT_CONTEXT_PREFIX = "[Text Context]\n";
       const TEXT_CONTEXT_SUFFIX = "\n[/Text Context]\n\n";
+      type ImageContextRecord = { path: string; name: string; mime: string; previewUrl: string };
       let textContextValues: string[] = [];
-      let contextTooltipEl: HTMLDivElement | null = null;
-
-      const ensureContextTooltip = () => {
-        if (contextTooltipEl) return contextTooltipEl;
-        const el = ownerDoc.createElement("div");
-        el.style.position = "fixed";
-        el.style.zIndex = "99999";
-        el.style.maxWidth = "460px";
-        el.style.maxHeight = "220px";
-        el.style.overflow = "auto";
-        el.style.padding = "8px 10px";
-        el.style.borderRadius = "8px";
-        el.style.background = "rgba(34, 34, 34, 0.94)";
-        el.style.color = "#fff";
-        el.style.fontSize = "12px";
-        el.style.lineHeight = "1.45";
-        el.style.whiteSpace = "pre-wrap";
-        el.style.wordBreak = "break-word";
-        el.style.boxShadow = "0 6px 16px rgba(0, 0, 0, 0.35)";
-        el.style.pointerEvents = "none";
-        el.style.display = "none";
-        const tooltipHost = ownerDoc.body || ownerDoc.documentElement;
-        if (tooltipHost) {
-          tooltipHost.appendChild(el);
+      let imageContextValues: ImageContextRecord[] = [];
+      const resolveCurrentPDFName = (): string => {
+        const fallback = "当前 PDF";
+        const selectedItems = ztoolkit.getGlobal("ZoteroPane")?.getSelectedItems?.() ?? [];
+        const currentItem = selectedItems[0] ?? item;
+        if (!currentItem) return fallback;
+        const fromFilename = String((currentItem as any).getFilename?.() || "").trim();
+        if (fromFilename) return fromFilename;
+        const fromTitle = String((currentItem as any).getField?.("title") || "").trim();
+        if (fromTitle) return fromTitle;
+        const fromDisplayTitle = String((currentItem as any).getDisplayTitle?.() || "").trim();
+        if (fromDisplayTitle) return fromDisplayTitle;
+        return fallback;
+      };
+      const currentPDFName = resolveCurrentPDFName();
+      const inferImageExtension = (mime: string) => {
+        const normalized = String(mime || "").toLowerCase();
+        if (normalized.includes("png")) return "png";
+        if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+        if (normalized.includes("webp")) return "webp";
+        if (normalized.includes("gif")) return "gif";
+        return "png";
+      };
+      const saveImageBytesToTemp = async (
+        bytes: Uint8Array,
+        mime: string,
+        source: "snip" | "paste",
+      ): Promise<{ path: string; name: string; mime: string }> => {
+        const g = globalThis as any;
+        const pathUtils = g.PathUtils;
+        const ioUtils = g.IOUtils;
+        if (!pathUtils?.join || !pathUtils?.tempDir || !ioUtils?.write) {
+          throw new Error("当前环境不支持图片暂存");
         }
-        contextTooltipEl = el;
-        return el;
+        const ext = inferImageExtension(mime);
+        const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+        const filename = `firefly-${source}-${stamp}.${ext}`;
+        const absPath = pathUtils.join(pathUtils.tempDir, filename);
+        await ioUtils.write(absPath, bytes);
+        return { path: String(absPath), name: filename, mime };
       };
-
-      const showContextTooltip = (text: string, ev: MouseEvent) => {
-        if (!text.trim()) return;
-        const el = ensureContextTooltip();
-        el.textContent = text;
-        el.style.display = "block";
-        const x = Math.min(ev.clientX + 12, (ownerDoc.defaultView?.innerWidth ?? 1200) - 480);
-        const y = Math.min(ev.clientY + 12, (ownerDoc.defaultView?.innerHeight ?? 800) - 240);
-        el.style.left = `${Math.max(8, x)}px`;
-        el.style.top = `${Math.max(8, y)}px`;
+      const addImageContextFromBlob = async (blob: Blob, source: "snip" | "paste") => {
+        const mime = blob.type || "image/png";
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        const saved = await saveImageBytesToTemp(buf, mime, source);
+        const previewUrl =
+          (ownerDoc.defaultView?.URL || URL).createObjectURL(
+            new Blob([buf], { type: mime || "image/png" }),
+          );
+        imageContextValues.push({ ...saved, previewUrl });
+        syncContextBar();
       };
-
-      const hideContextTooltip = () => {
-        if (!contextTooltipEl) return;
-        contextTooltipEl.style.display = "none";
+      let imagePreviewTooltipEl: HTMLDivElement | null = null;
+      let imagePreviewTooltipImg: HTMLImageElement | null = null;
+      let imagePreviewTooltipCaption: HTMLDivElement | null = null;
+      const ensureImagePreviewTooltip = () => {
+        if (imagePreviewTooltipEl && imagePreviewTooltipImg && imagePreviewTooltipCaption) {
+          return {
+            root: imagePreviewTooltipEl,
+            img: imagePreviewTooltipImg,
+            caption: imagePreviewTooltipCaption,
+          };
+        }
+        const root = ownerDoc.createElement("div");
+        root.style.position = "fixed";
+        root.style.zIndex = "2147483647";
+        root.style.display = "none";
+        root.style.pointerEvents = "none";
+        root.style.border = "1px solid rgba(120, 120, 120, 0.4)";
+        root.style.background = "rgba(255, 255, 255, 0.98)";
+        root.style.borderRadius = "10px";
+        root.style.padding = "8px";
+        root.style.boxShadow = "0 8px 22px rgba(0, 0, 0, 0.2)";
+        root.style.maxWidth = "340px";
+        const img = ownerDoc.createElement("img");
+        img.style.display = "block";
+        img.style.maxWidth = "320px";
+        img.style.maxHeight = "220px";
+        img.style.objectFit = "contain";
+        img.style.borderRadius = "6px";
+        const caption = ownerDoc.createElement("div");
+        caption.style.display = "none";
+        root.append(img, caption);
+        (ownerDoc.body || ownerDoc.documentElement)?.appendChild(root);
+        imagePreviewTooltipEl = root;
+        imagePreviewTooltipImg = img;
+        imagePreviewTooltipCaption = caption;
+        return { root, img, caption };
+      };
+      const hideImagePreviewTooltip = () => {
+        if (!imagePreviewTooltipEl) return;
+        imagePreviewTooltipEl.style.display = "none";
+      };
+      const showImagePreviewTooltip = (anchorEl: HTMLElement, imgRec: ImageContextRecord) => {
+        const tooltip = ensureImagePreviewTooltip();
+        tooltip.img.src = imgRec.previewUrl;
+        tooltip.caption.textContent = "";
+        tooltip.root.style.display = "block";
+        const w = ownerDoc.defaultView?.innerWidth ?? 1200;
+        const h = ownerDoc.defaultView?.innerHeight ?? 800;
+        const rect = anchorEl.getBoundingClientRect();
+        // 先显示再测量，保证使用真实尺寸做“标签上方居中”定位。
+        const tooltipWidth = Math.max(1, tooltip.root.offsetWidth || 340);
+        const tooltipHeight = Math.max(1, tooltip.root.offsetHeight || 280);
+        const centerX = rect.left + rect.width / 2;
+        const left = Math.min(Math.max(8, centerX - tooltipWidth / 2), w - tooltipWidth - 8);
+        // 固定贴在标签上方；若顶部空间不足再回退到标签下方。
+        const preferredTop = rect.top - tooltipHeight - 8;
+        const fallbackTop = rect.bottom + 8;
+        const top = preferredTop >= 8 ? preferredTop : Math.min(fallbackTop, h - tooltipHeight - 8);
+        tooltip.root.style.left = `${Math.max(8, left)}px`;
+        tooltip.root.style.top = `${Math.max(8, top)}px`;
       };
 
       const buildContextPayload = () =>
@@ -413,42 +517,60 @@ export function registerLLMItemPaneSection() {
 
       const syncContextBar = () => {
         contextBar.replaceChildren();
-        const has = textContextValues.length > 0;
-        contextBar.style.display = has ? "flex" : "none";
-        if (!has) return;
-        textContextValues.forEach((_, idx) => {
+        const has = textContextValues.length > 0 || imageContextValues.length > 0;
+        contextBar.style.display = "flex";
+        contextBar.style.justifyContent = has ? "flex-start" : "center";
+        if (!has) {
+          const pdfLabel = ownerDoc.createElement("span");
+          pdfLabel.textContent = "流萤在等待你的提问";
+          pdfLabel.title = "流萤在等待你的提问";
+          pdfLabel.style.display = "inline-flex";
+          pdfLabel.style.alignItems = "center";
+          pdfLabel.style.justifyContent = "center";
+          pdfLabel.style.flex = "1";
+          pdfLabel.style.padding = "1px 0";
+          pdfLabel.style.minHeight = "24px";
+          pdfLabel.style.minWidth = "0";
+          pdfLabel.style.maxWidth = "100%";
+          pdfLabel.style.overflow = "hidden";
+          pdfLabel.style.textOverflow = "ellipsis";
+          pdfLabel.style.whiteSpace = "nowrap";
+          pdfLabel.style.fontSize = "12px";
+          pdfLabel.style.fontWeight = "600";
+          pdfLabel.style.opacity = "0.52";
+          pdfLabel.style.fontStyle = "italic";
+          pdfLabel.style.lineHeight = "1.2";
+          contextBar.appendChild(pdfLabel);
+          return;
+        }
+        const buildChip = (
+          label: string,
+          title: string,
+          iconSrc: string,
+          onHoverBind: ((chip: HTMLDivElement, icon: HTMLImageElement, labelEl: HTMLSpanElement) => void) | null,
+          onRemove: () => void,
+        ) => {
           const chip = ownerDoc.createElement("div");
           chip.style.display = "inline-flex";
           chip.style.alignItems = "center";
           chip.style.gap = "5px";
-          chip.style.padding = "1px 7px";
+          chip.style.padding = "0px 7px";
           chip.style.minHeight = "24px";
           chip.style.borderRadius = "999px";
           chip.style.background = "rgba(127, 127, 127, 0.08)";
           chip.style.border = "1px solid rgba(120, 120, 120, 0.24)";
           chip.style.whiteSpace = "nowrap";
-          chip.title = textContextValues[idx] || "";
-          const bindContextTooltip = (target: HTMLElement) => {
-            target.addEventListener("mouseenter", (ev) => {
-              showContextTooltip(textContextValues[idx] || "", ev as MouseEvent);
-            });
-            target.addEventListener("mousemove", (ev) => {
-              showContextTooltip(textContextValues[idx] || "", ev as MouseEvent);
-            });
-            target.addEventListener("mouseleave", () => {
-              hideContextTooltip();
-            });
-          };
+          chip.title = title;
 
           const chipIcon = ownerDoc.createElement("img");
-          chipIcon.src = `chrome://${config.addonRef}/content/icons/copy.svg`;
+          chipIcon.src = iconSrc;
           chipIcon.alt = "context";
           chipIcon.style.width = "13px";
           chipIcon.style.height = "13px";
           chipIcon.style.opacity = "0.75";
 
           const chipLabel = ownerDoc.createElement("span");
-          chipLabel.textContent = `Text-${idx + 1}`;
+          chipLabel.textContent = label;
           chipLabel.style.fontSize = "12px";
           chipLabel.style.fontWeight = "600";
           chipLabel.style.opacity = "0.9";
@@ -466,20 +588,57 @@ export function registerLLMItemPaneSection() {
           chipClose.style.padding = "0 1px";
           chipClose.addEventListener("mouseenter", () => (chipClose.style.opacity = "0.85"));
           chipClose.addEventListener("mouseleave", () => (chipClose.style.opacity = "0.55"));
-          chipClose.addEventListener("click", () => {
-            textContextValues = textContextValues.filter((_, i) => i !== idx);
-            hideContextTooltip();
-            syncContextBar();
-            textArea.focus();
-          });
+          chipClose.addEventListener("click", onRemove);
 
           chip.append(chipIcon, chipLabel, chipClose);
-          bindContextTooltip(chip);
-          bindContextTooltip(chipIcon);
-          bindContextTooltip(chipLabel);
+          if (onHoverBind) {
+            onHoverBind(chip, chipIcon, chipLabel);
+          }
           contextBar.appendChild(chip);
+        };
+        textContextValues.forEach((_, idx) => {
+          buildChip(
+            `Text-${idx + 1}`,
+            textContextValues[idx] || "",
+            `chrome://${config.addonRef}/content/icons/copy.svg`,
+            null,
+            () => {
+              textContextValues = textContextValues.filter((__, i) => i !== idx);
+              syncContextBar();
+              focusTextAreaNoScroll();
+            },
+          );
+        });
+        imageContextValues.forEach((img, idx) => {
+          buildChip(
+            `Image-${idx + 1}`,
+            "",
+            `chrome://${config.addonRef}/content/icons/picture.svg`,
+            (chip, icon, labelEl) => {
+              const bind = (el: HTMLElement) => {
+                el.addEventListener("mouseenter", () => showImagePreviewTooltip(chip, img));
+                el.addEventListener("mousemove", () => showImagePreviewTooltip(chip, img));
+                el.addEventListener("mouseleave", () => hideImagePreviewTooltip());
+              };
+              bind(chip);
+              bind(icon);
+              bind(labelEl);
+            },
+            () => {
+              try {
+                (ownerDoc.defaultView?.URL || URL).revokeObjectURL(img.previewUrl);
+              } catch {
+                // ignore revoke failures
+              }
+              imageContextValues = imageContextValues.filter((__, i) => i !== idx);
+              hideImagePreviewTooltip();
+              syncContextBar();
+              focusTextAreaNoScroll();
+            },
+          );
         });
       };
+      syncContextBar();
 
       const textArea = ownerDoc.createElement("textarea");
       textArea.placeholder = "询问关于这篇论文的问题…";
@@ -487,6 +646,32 @@ export function registerLLMItemPaneSection() {
       textArea.style.resize = "vertical";
       textArea.style.userSelect = "text";
       (textArea.style as any).MozUserSelect = "text";
+      const focusTextAreaNoScroll = () => {
+        try {
+          (textArea as any).focus({ preventScroll: true });
+        } catch {
+          textArea.focus();
+        }
+      };
+      textArea.addEventListener("paste", (ev: ClipboardEvent) => {
+        const items = Array.from(ev.clipboardData?.items || []);
+        const imageItems = items.filter((item) => item.type?.startsWith("image/"));
+        if (!imageItems.length) return;
+        ev.preventDefault();
+        for (const item of imageItems) {
+          const file = item.getAsFile();
+          if (!file) continue;
+          void (async () => {
+            try {
+              await addImageContextFromBlob(file, "paste");
+              focusTextAreaNoScroll();
+            } catch (e) {
+              ztoolkit.log("[llm-ui] paste image failed:", String(e));
+              appendBubble("system", `粘贴图片失败: ${String(e)}`);
+            }
+          })();
+        }
+      });
 
       const composeActions = ownerDoc.createElement("div");
       composeActions.style.display = "flex";
@@ -579,7 +764,7 @@ export function registerLLMItemPaneSection() {
         // 仅在后台携带上下文，不污染用户输入框。
         textContextValues.push(selectedText);
         syncContextBar();
-        textArea.focus();
+        focusTextAreaNoScroll();
       };
       // 在 mousedown 阶段读取选区，避免点击按钮导致 Zotero 清空 selection。
       fontBtn.addEventListener("mousedown", (ev) => {
@@ -601,8 +786,137 @@ export function registerLLMItemPaneSection() {
       imageIcon.style.width = "16px";
       imageIcon.style.height = "16px";
       screenshotBtn.appendChild(imageIcon);
+      const startAreaScreenshotCapture = async () => {
+        const captureWin = ownerDoc.defaultView as Window | null;
+        if (!captureWin) {
+          throw new Error("无法访问当前窗口");
+        }
+        const selection = await new Promise<{ left: number; top: number; width: number; height: number } | null>(
+          (resolve) => {
+            const overlay = ownerDoc.createElement("div");
+            overlay.style.position = "fixed";
+            overlay.style.left = "0";
+            overlay.style.top = "0";
+            overlay.style.right = "0";
+            overlay.style.bottom = "0";
+            overlay.style.zIndex = "2147483646";
+            overlay.style.background = "rgba(0, 0, 0, 0.08)";
+            overlay.style.cursor = "crosshair";
+            overlay.style.userSelect = "none";
+            const box = ownerDoc.createElement("div");
+            box.style.position = "fixed";
+            box.style.border = "1px solid rgba(47, 110, 232, 0.95)";
+            box.style.background = "rgba(47, 110, 232, 0.14)";
+            box.style.display = "none";
+            box.style.pointerEvents = "none";
+            box.style.zIndex = "2147483647";
+            overlay.appendChild(box);
+            const host = ownerDoc.body || ownerDoc.documentElement;
+            if (!host) {
+              resolve(null);
+              return;
+            }
+            host.appendChild(overlay);
+            let dragging = false;
+            let startX = 0;
+            let startY = 0;
+            const cleanup = (rect: { left: number; top: number; width: number; height: number } | null) => {
+              overlay.removeEventListener("mousedown", onMouseDown);
+              overlay.removeEventListener("mousemove", onMouseMove);
+              overlay.removeEventListener("mouseup", onMouseUp);
+              captureWin.removeEventListener("keydown", onKeyDown, true);
+              overlay.remove();
+              resolve(rect);
+            };
+            const onMouseDown = (ev: MouseEvent) => {
+              ev.preventDefault();
+              dragging = true;
+              startX = ev.clientX;
+              startY = ev.clientY;
+              box.style.display = "block";
+              box.style.left = `${startX}px`;
+              box.style.top = `${startY}px`;
+              box.style.width = "0px";
+              box.style.height = "0px";
+            };
+            const onMouseMove = (ev: MouseEvent) => {
+              if (!dragging) return;
+              const left = Math.min(startX, ev.clientX);
+              const top = Math.min(startY, ev.clientY);
+              const width = Math.abs(ev.clientX - startX);
+              const height = Math.abs(ev.clientY - startY);
+              box.style.left = `${left}px`;
+              box.style.top = `${top}px`;
+              box.style.width = `${width}px`;
+              box.style.height = `${height}px`;
+            };
+            const onMouseUp = (ev: MouseEvent) => {
+              if (!dragging) {
+                cleanup(null);
+                return;
+              }
+              dragging = false;
+              const left = Math.min(startX, ev.clientX);
+              const top = Math.min(startY, ev.clientY);
+              const width = Math.abs(ev.clientX - startX);
+              const height = Math.abs(ev.clientY - startY);
+              if (width < 4 || height < 4) {
+                cleanup(null);
+                return;
+              }
+              cleanup({ left, top, width, height });
+            };
+            const onKeyDown = (ev: KeyboardEvent) => {
+              if (ev.key === "Escape") {
+                ev.preventDefault();
+                cleanup(null);
+              }
+            };
+            overlay.addEventListener("mousedown", onMouseDown);
+            overlay.addEventListener("mousemove", onMouseMove);
+            overlay.addEventListener("mouseup", onMouseUp);
+            captureWin.addEventListener("keydown", onKeyDown, true);
+          },
+        );
+        if (!selection) {
+          return;
+        }
+        const canvas = ownerDoc.createElement("canvas");
+        const dpr = Math.max(1, captureWin.devicePixelRatio || 1);
+        canvas.width = Math.max(1, Math.round(selection.width * dpr));
+        canvas.height = Math.max(1, Math.round(selection.height * dpr));
+        const ctx: any = canvas.getContext("2d");
+        if (!ctx || typeof ctx.drawWindow !== "function") {
+          throw new Error("当前环境不支持区域截图");
+        }
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.drawWindow(
+          captureWin,
+          selection.left,
+          selection.top,
+          selection.width,
+          selection.height,
+          "rgb(255,255,255)",
+        );
+        ctx.restore();
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+        if (!blob) {
+          throw new Error("截图生成失败");
+        }
+        await addImageContextFromBlob(blob, "snip");
+      };
       screenshotBtn.addEventListener("click", () => {
-        ztoolkit.log("[llm-ui] 截图工具暂未接入 Zotero 原生截图 API");
+        if (isSending) return;
+        void (async () => {
+          try {
+            await startAreaScreenshotCapture();
+            focusTextAreaNoScroll();
+          } catch (e) {
+            ztoolkit.log("[llm-ui] screenshot failed:", String(e));
+            appendBubble("system", `截图失败: ${String(e)}`);
+          }
+        })();
       });
 
       let thinkingState: "Enable" | "Disable" = "Enable";
@@ -649,7 +963,11 @@ export function registerLLMItemPaneSection() {
       sendBtn.style.borderRadius = "999px";
       sendBtn.style.padding = "10px 22px";
       sendBtn.style.border = "none";
-      sendBtn.style.background = "linear-gradient(180deg, #3f83f8 0%, #2f6ee8 100%)";
+      const sendBgIdle = "linear-gradient(180deg, #3f83f8 0%, #2f6ee8 100%)";
+      const sendBgIdleHover = "linear-gradient(180deg, #3274ed 0%, #265fdb 100%)";
+      const sendBgCancel = "linear-gradient(180deg, #eb5757 0%, #d13434 100%)";
+      const sendBgCancelHover = "linear-gradient(180deg, #df4a4a 0%, #c52e2e 100%)";
+      sendBtn.style.background = sendBgIdle;
       sendBtn.style.color = "#ffffff";
       sendBtn.style.fontWeight = "700";
       sendBtn.style.fontSize = "14px";
@@ -660,14 +978,80 @@ export function registerLLMItemPaneSection() {
       sendBtn.style.cursor = "pointer";
       sendBtn.style.boxShadow = "0 2px 6px rgba(47, 110, 232, 0.28)";
       sendBtn.style.transition = "background 140ms ease, transform 140ms ease, opacity 140ms ease";
+      const createAbortControllerCompat = (): AbortController => {
+        const AC = (globalThis as any).AbortController;
+        if (AC) {
+          return new AC() as AbortController;
+        }
+        let aborted = false;
+        const listeners: Array<() => void> = [];
+        const signal = {
+          get aborted() {
+            return aborted;
+          },
+          addEventListener: (_type: string, listener: any, options?: any) => {
+            if (_type !== "abort" || !listener) return;
+            const cb =
+              typeof listener === "function"
+                ? listener
+                : typeof listener.handleEvent === "function"
+                  ? () => listener.handleEvent()
+                  : null;
+            if (!cb) return;
+            if (aborted) {
+              cb();
+              return;
+            }
+            if (options?.once) {
+              const onceCb = () => {
+                cb();
+                const idx = listeners.indexOf(onceCb);
+                if (idx >= 0) listeners.splice(idx, 1);
+              };
+              listeners.push(onceCb);
+              return;
+            }
+            listeners.push(cb);
+          },
+        } as any;
+        return {
+          signal,
+          abort: () => {
+            if (aborted) return;
+            aborted = true;
+            const cbs = [...listeners];
+            listeners.length = 0;
+            for (const cb of cbs) {
+              try {
+                cb();
+              } catch {
+                // ignore callback failures
+              }
+            }
+          },
+        } as AbortController;
+      };
+      let isSending = false;
+      let activeStreamAbortController: AbortController | null = null;
+      const syncSendButtonState = (sending: boolean) => {
+        isSending = sending;
+        sendBtn.textContent = sending ? "Cancel" : "Send";
+        sendBtn.style.background = sending ? sendBgCancel : sendBgIdle;
+        sendBtn.style.boxShadow = sending
+          ? "0 2px 6px rgba(209, 52, 52, 0.28)"
+          : "0 2px 6px rgba(47, 110, 232, 0.28)";
+        sendBtn.style.opacity = "1";
+        sendBtn.style.cursor = "pointer";
+      };
       sendBtn.addEventListener("mouseenter", () => {
         if (sendBtn.disabled) return;
-        sendBtn.style.background = "linear-gradient(180deg, #3274ed 0%, #265fdb 100%)";
+        sendBtn.style.background = isSending ? sendBgCancelHover : sendBgIdleHover;
       });
       sendBtn.addEventListener("mouseleave", () => {
         if (sendBtn.disabled) return;
-        sendBtn.style.background = "linear-gradient(180deg, #3f83f8 0%, #2f6ee8 100%)";
+        sendBtn.style.background = isSending ? sendBgCancel : sendBgIdle;
       });
+      syncSendButtonState(false);
 
       composeActions.append(leftActions, sendBtn);
       composeCard.append(composeMeta, textArea, composeActions);
@@ -791,8 +1175,9 @@ export function registerLLMItemPaneSection() {
           style.id = typingStyleId;
           style.textContent = `
 @keyframes ffTypingDot {
-  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
-  40% { transform: translateY(-3px); opacity: 0.95; }
+  0%, 100% { transform: translateY(0) scale(0.9); opacity: 0.35; }
+  30% { transform: translateY(-6px) scale(1.02); opacity: 1; }
+  60% { transform: translateY(-2px) scale(0.96); opacity: 0.75; }
 }
 `;
           ownerDoc.head?.appendChild(style);
@@ -867,11 +1252,12 @@ export function registerLLMItemPaneSection() {
         thinkingWrap.append(thinkingHead, detailsLabel, thinkingBody);
 
         const answerBubble = ownerDoc.createElement("div");
+        const answerBubbleBg = "rgba(127, 127, 127, 0.10)";
         answerBubble.style.padding = "10px 12px";
         answerBubble.style.borderRadius = "10px";
         answerBubble.style.whiteSpace = "pre-wrap";
         answerBubble.style.wordBreak = "break-word";
-        answerBubble.style.background = "rgba(127, 127, 127, 0.10)";
+        answerBubble.style.background = "transparent";
         answerBubble.style.fontSize = "15px";
         answerBubble.style.lineHeight = "1.72";
         answerBubble.style.fontFamily =
@@ -879,6 +1265,7 @@ export function registerLLMItemPaneSection() {
         answerBubble.style.userSelect = "text";
         (answerBubble.style as any).MozUserSelect = "text";
         answerBubble.style.cursor = "text";
+        answerBubble.style.color = "inherit";
         const typingDots = ownerDoc.createElement("div");
         typingDots.style.display = "inline-flex";
         typingDots.style.alignItems = "center";
@@ -891,12 +1278,27 @@ export function registerLLMItemPaneSection() {
           dot.style.width = "6px";
           dot.style.height = "6px";
           dot.style.borderRadius = "999px";
-          dot.style.background = "rgba(95, 95, 95, 0.85)";
+          dot.style.background = "currentColor";
           dot.style.display = "inline-block";
-          dot.style.animation = `ffTypingDot 1.05s ${i * 0.18}s infinite ease-in-out`;
+          dot.style.animation = `ffTypingDot 0.8s ${i * 0.12}s infinite cubic-bezier(0.35, 0, 0.25, 1)`;
           typingDots.appendChild(dot);
         }
         answerBubble.appendChild(typingDots);
+        const setTypingVisible = (visible: boolean) => {
+          typingDots.style.display = visible ? "inline-flex" : "none";
+          if (visible) {
+            answerBubble.style.background = "transparent";
+          }
+        };
+        const setAnswerText = (text: string) => {
+          const val = String(text || "");
+          const has = !!val.trim();
+          setTypingVisible(!has);
+          answerBubble.textContent = has ? val : " ";
+          if (has) {
+            answerBubble.style.background = answerBubbleBg;
+          }
+        };
 
         wrap.append(modelLabel, thinkingWrap, answerBubble);
         conversationArea.appendChild(wrap);
@@ -916,7 +1318,11 @@ export function registerLLMItemPaneSection() {
             }
             thinkingWrap.style.display = "block";
             thinkingBody.textContent = formatThinkingParagraphs(val);
+            // 一旦开始输出 thinking，立刻隐藏等待中的三个点。
+            setTypingVisible(false);
           },
+          setAnswerText,
+          setTypingVisible,
         };
       }
 
@@ -944,7 +1350,7 @@ export function registerLLMItemPaneSection() {
             .join("\n\n")
             .trim();
           assistant.setThinking(mergedThinking);
-          assistant.answerBubble.textContent = parsed.answer || normalizeDisplayText(record.content) || " ";
+          assistant.setAnswerText(parsed.answer || normalizeDisplayText(record.content) || " ");
         }
       }
 
@@ -1000,18 +1406,24 @@ export function registerLLMItemPaneSection() {
       }
 
       async function sendCurrentMessage() {
+        if (isSending) {
+          return;
+        }
         const message = textArea.value.trim();
-        if (!message) {
+        const mediaPaths = imageContextValues.map((v) => v.path).filter((v) => !!v);
+        if (!message && mediaPaths.length === 0) {
           return;
         }
         const contextPayload = buildContextPayload();
-        const messageWithContext = contextPayload ? `${contextPayload}${message}` : message;
+        const baseMessage = contextPayload ? `${contextPayload}${message}` : message;
+        const messageWithContext = baseMessage || (mediaPaths.length > 0 ? "[Image Context Attached]" : "");
         textArea.value = "";
-        appendUserMessage(message);
-        getTabHistory(activeTabId).push({ role: "user", content: message });
-        sendBtn.disabled = true;
-        sendBtn.style.opacity = "0.7";
-        sendBtn.style.cursor = "not-allowed";
+        const userDisplayText =
+          message || (mediaPaths.length > 0 ? `[已附带 ${mediaPaths.length} 张图片]` : "(空消息)");
+        appendUserMessage(userDisplayText);
+        getTabHistory(activeTabId).push({ role: "user", content: userDisplayText });
+        activeStreamAbortController = createAbortControllerCompat();
+        syncSendButtonState(true);
         ztoolkit.log("[llm-ui] sending:", messageWithContext);
         try {
           await ensureNanobotBridgeStarted();
@@ -1023,13 +1435,14 @@ export function registerLLMItemPaneSection() {
             messageWithContext,
             streamSessionID,
             thinkingState,
+            mediaPaths,
             (delta) => {
               streamedText += delta;
               const parsedLive = splitThinkingAndAnswer(streamedText);
               if (thinkingState === "Enable") {
                 assistant.setThinking(parsedLive.thinking);
               }
-              assistant.answerBubble.textContent = parsedLive.answer || " ";
+              assistant.setAnswerText(parsedLive.answer || "");
               conversationArea.scrollTop = conversationArea.scrollHeight;
             },
             (finalContent) => {
@@ -1047,7 +1460,7 @@ export function registerLLMItemPaneSection() {
                     assistant.setThinking(mergedThinking);
                   }
                 }
-                assistant.answerBubble.textContent = splitThinkingAndAnswer(streamedText).answer || " ";
+                assistant.setAnswerText(splitThinkingAndAnswer(streamedText).answer || "");
                 conversationArea.scrollTop = conversationArea.scrollHeight;
               }
             },
@@ -1059,6 +1472,7 @@ export function registerLLMItemPaneSection() {
               assistant.setThinking(streamedThinking);
               conversationArea.scrollTop = conversationArea.scrollHeight;
             },
+            activeStreamAbortController.signal,
           );
           const parsed = splitThinkingAndAnswer(streamedText);
           if (thinkingState === "Enable") {
@@ -1071,28 +1485,39 @@ export function registerLLMItemPaneSection() {
             assistant.setThinking("");
           }
           if (parsed.answer) {
-            assistant.answerBubble.textContent = parsed.answer;
+            assistant.setAnswerText(parsed.answer);
           }
           if (!streamedText.trim()) {
-            assistant.answerBubble.textContent = "(无输出)";
+            assistant.setAnswerText("(无输出)");
           }
           const finalParsed = splitThinkingAndAnswer(streamedText);
           getTabHistory(activeTabId).push({
             role: "assistant",
-            content: finalParsed.answer || assistant.answerBubble.textContent || "",
+            content:
+              finalParsed.answer ||
+              String(assistant.answerBubble.textContent || "").trim() ||
+              "(无输出)",
             reasoning_content:
               thinkingState === "Enable"
                 ? [streamedThinking, finalParsed.thinking].filter((s) => !!s && s.trim()).join("\n\n")
                 : "",
           });
         } catch (e) {
-          appendBubble("system", `发送失败: ${String(e)}`);
-          ztoolkit.log("[llm-ui] send failed:", String(e));
+          const msg = String((e as any)?.message || e || "");
+          const aborted =
+            msg.toLowerCase().includes("abort") ||
+            msg.toLowerCase().includes("aborted") ||
+            msg.toLowerCase().includes("cancel");
+          if (aborted) {
+            appendBubble("system", "已取消发送");
+            ztoolkit.log("[llm-ui] send canceled");
+          } else {
+            appendBubble("system", `发送失败: ${msg}`);
+            ztoolkit.log("[llm-ui] send failed:", msg);
+          }
         } finally {
-          sendBtn.disabled = false;
-          sendBtn.style.opacity = "1";
-          sendBtn.style.cursor = "pointer";
-          sendBtn.style.background = "linear-gradient(180deg, #3f83f8 0%, #2f6ee8 100%)";
+          activeStreamAbortController = null;
+          syncSendButtonState(false);
           await refreshBridgeStatus();
         }
       }
@@ -1102,15 +1527,26 @@ export function registerLLMItemPaneSection() {
         ev.stopPropagation();
       });
       sendBtn.addEventListener("click", () => {
+        if (isSending) {
+          activeStreamAbortController?.abort();
+          return;
+        }
         void sendCurrentMessage();
       });
+      // 兜底：部分 Zotero pane 场景下 addEventListener click 可能不稳定，保留 onclick 保障可触发。
       sendBtn.onclick = () => {
+        if (isSending) {
+          activeStreamAbortController?.abort();
+          return;
+        }
         void sendCurrentMessage();
       };
       textArea.addEventListener("keydown", (ev: KeyboardEvent) => {
         if (ev.key === "Enter" && !ev.shiftKey) {
           ev.preventDefault();
-          void sendCurrentMessage();
+          if (!isSending) {
+            void sendCurrentMessage();
+          }
         }
       });
 
