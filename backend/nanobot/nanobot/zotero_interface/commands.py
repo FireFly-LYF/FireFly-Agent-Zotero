@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import select
 import signal
 import sys
@@ -1051,6 +1052,94 @@ def agent(
                 )
                 return f"{guidance}\n\n{content}"
 
+            _WIKI_PDF_MARKER_RE = re.compile(r"\[zotero_current_wiki_pdf_path=(.+?)\]")
+
+            def _extract_current_wiki_pdf_path(content: str) -> str:
+                if not content:
+                    return ""
+                m = _WIKI_PDF_MARKER_RE.search(content)
+                return str(m.group(1)).strip() if m else ""
+
+            def _resolve_rag_path_from_pdf_marker(pdf_path: str) -> Path | None:
+                if not pdf_path:
+                    return None
+                text = str(pdf_path)
+                lowered = text.lower().replace("\\", "/")
+                marker = "raw/pdf/"
+                idx = lowered.find(marker)
+                if idx < 0:
+                    return None
+                head = text[:idx]
+                tail = text[idx + len(marker) :]
+                return (Path(f"{head}raw/rag") / tail).with_suffix(".jsonl")
+
+            def _tokenize_query(text: str) -> list[str]:
+                # 支持中英文混合：中文按连续片段，英文数字按单词。
+                return [
+                    tok.lower()
+                    for tok in re.findall(r"[\u4e00-\u9fff]{1,}|[A-Za-z0-9_]{2,}", text or "")
+                    if tok
+                ]
+
+            def _retrieve_local_rag_chunks(query: str, rag_jsonl_path: Path, top_k: int = 6) -> list[dict[str, Any]]:
+                if not rag_jsonl_path.is_file():
+                    return []
+                tokens = _tokenize_query(query)
+                if not tokens:
+                    return []
+                try:
+                    lines = rag_jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                except Exception:
+                    return []
+                scored: list[tuple[int, dict[str, Any]]] = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    text = str(rec.get("text", "") or "")
+                    score = 0
+                    lowered = text.lower()
+                    for tok in tokens:
+                        if tok in lowered:
+                            score += 1
+                    if score <= 0:
+                        continue
+                    scored.append((score, rec))
+                scored.sort(key=lambda x: x[0], reverse=True)
+                return [rec for _, rec in scored[: max(1, top_k)]]
+
+            def _inject_rag_context(content: str) -> str:
+                if not content:
+                    return content
+                if "[RAG Context]" in content:
+                    return content
+                pdf_path = _extract_current_wiki_pdf_path(content)
+                if not pdf_path:
+                    return content
+                rag_path = _resolve_rag_path_from_pdf_marker(pdf_path)
+                if not rag_path:
+                    return content
+                chunks = _retrieve_local_rag_chunks(content, rag_path)
+                if not chunks:
+                    return content
+                block_lines = [
+                    "[RAG Context]",
+                    f"source: {rag_path}",
+                    "以下片段来自当前打开文献的本地 RAG 检索（按相关度排序）：",
+                ]
+                for i, rec in enumerate(chunks, start=1):
+                    txt = str(rec.get("text", "") or "").strip()
+                    if len(txt) > 900:
+                        txt = txt[:900] + " ..."
+                    block_lines.append(f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}) ---")
+                    block_lines.append(txt)
+                block_lines.append("[/RAG Context]")
+                return f"{chr(10).join(block_lines)}\n\n{content}"
+
             def _cache_zotero_media(media_paths: list[str]) -> list[str]:
                 """把前端传来的图片缓存到 workspace/temp，返回可读路径列表。"""
                 if not media_paths:
@@ -1148,6 +1237,124 @@ def agent(
                     }
                     return web.json_response(payload)
 
+                def _resolve_pdf_path(body: dict[str, Any]) -> Path | None:
+                    wiki_pdf_path = str((body or {}).get("wiki_pdf_path", "")).strip()
+                    if wiki_pdf_path:
+                        p = Path(wiki_pdf_path).expanduser()
+                        if p.is_file():
+                            return p
+                    pdf_path = str((body or {}).get("pdf_path", "")).strip()
+                    if pdf_path:
+                        p = Path(pdf_path).expanduser()
+                        if p.is_file():
+                            return p
+                    pdf_dir = str((body or {}).get("pdf_dir", "")).strip()
+                    pdf_name = str((body or {}).get("pdf_name", "")).strip()
+                    if pdf_dir and pdf_name:
+                        p = (Path(pdf_dir).expanduser() / pdf_name).resolve()
+                        if p.is_file():
+                            return p
+                    return None
+
+                def _resolve_markdown_path(pdf_path: Path) -> Path:
+                    text = str(pdf_path)
+                    marker = "raw\\pdf\\"
+                    marker_alt = "raw/pdf/"
+                    lowered = text.lower()
+                    idx = lowered.find(marker)
+                    if idx < 0:
+                        idx = lowered.find(marker_alt)
+                    if idx >= 0:
+                        head = text[:idx]
+                        tail = text[idx + len(marker) :] if lowered.find(marker) >= 0 else text[idx + len(marker_alt) :]
+                        markdown_root = Path(f"{head}raw/markdown")
+                        return (markdown_root / tail).with_suffix(".md")
+                    return pdf_path.with_suffix(".md")
+
+                async def _ensure_pdf_converted(pdf_path: Path, markdown_path: Path) -> dict[str, Any]:
+                    if markdown_path.is_file():
+                        return {
+                            "converted": False,
+                            "reason": "already_converted",
+                        }
+
+                    script_path = (
+                        Path(__file__).resolve().parents[1]
+                        / "skills"
+                        / "markdown"
+                        / "scripts"
+                        / "single_pdf_to_markdown.py"
+                    )
+                    if not script_path.is_file():
+                        raise FileNotFoundError(f"converter script not found: {script_path}")
+
+                    proc = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        str(script_path),
+                        "--pdf",
+                        str(pdf_path),
+                        "--markdown",
+                        str(markdown_path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout_b, stderr_b = await proc.communicate()
+                    stdout = stdout_b.decode("utf-8", errors="replace")
+                    stderr = stderr_b.decode("utf-8", errors="replace")
+                    if proc.returncode != 0:
+                        raise RuntimeError(
+                            f"pdf convert failed (code={proc.returncode}): {stderr or stdout}".strip()
+                        )
+                    return {
+                        "converted": True,
+                        "stdout": stdout.strip(),
+                    }
+
+                async def _pdf_opened(request: web.Request) -> web.Response:
+                    return web.json_response(
+                        {
+                            "ok": True,
+                            "enabled": False,
+                            "reason": "auto_pdf_conversion_disabled",
+                        }
+                    )
+
+                async def _convert_markdown(request: web.Request) -> web.Response:
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+                    raw_pdf_path = str((body or {}).get("wiki_pdf_path", "")).strip() or str(
+                        (body or {}).get("pdf_path", "")
+                    ).strip()
+                    if not raw_pdf_path:
+                        return web.json_response({"ok": False, "error": "pdf_path is required"}, status=400)
+
+                    pdf_path = Path(raw_pdf_path).expanduser().resolve()
+                    markdown_path = _resolve_markdown_path(pdf_path)
+                    try:
+                        result = await _ensure_pdf_converted(pdf_path, markdown_path)
+                    except Exception as exc:
+                        return web.json_response(
+                            {
+                                "ok": False,
+                                "error": str(exc),
+                                "pdf_path": str(pdf_path),
+                                "markdown_path": str(markdown_path),
+                            },
+                            status=500,
+                        )
+
+                    return web.json_response(
+                        {
+                            "ok": True,
+                            "pdf_path": str(pdf_path),
+                            "markdown_path": str(markdown_path),
+                            **result,
+                        }
+                    )
+
                 async def _ingest(request: web.Request) -> web.Response:
                     try:
                         body = await request.json()
@@ -1165,6 +1372,7 @@ def agent(
                     media_paths = [str(p).strip() for p in media_paths if str(p).strip()]
                     cached_media = _cache_zotero_media(media_paths)
                     patched = _inject_zotero_item_context(content, override or session_id)
+                    patched = _inject_rag_context(patched)
                     await inbound_from_zotero.put({
                         "message": patched,
                         "session_id": override,
@@ -1195,6 +1403,7 @@ def agent(
                     else:
                         current_channel, current_chat_id = "cli", source_session
                     patched_content = _inject_zotero_item_context(content, source_session)
+                    patched_content = _inject_rag_context(patched_content)
 
                     subscriber = _stream_subscribe(current_chat_id)
                     response = web.StreamResponse(
@@ -1246,6 +1455,8 @@ def agent(
                 app.router.add_get("/zotero/history", _history)
                 app.router.add_post("/zotero/message", _ingest)
                 app.router.add_post("/zotero/stream", _stream_chat)
+                app.router.add_post("/zotero/pdf-opened", _pdf_opened)
+                app.router.add_post("/zotero/convert-markdown", _convert_markdown)
                 runner = web.AppRunner(app)
                 await runner.setup()
                 site = web.TCPSite(runner, zotero_bridge_host, zotero_bridge_port)
@@ -1386,6 +1597,7 @@ def agent(
                         else:
                             current_channel, current_chat_id = "cli", source_session
                         patched_command = _inject_zotero_item_context(command, source_session)
+                        patched_command = _inject_rag_context(patched_command)
 
                         await bus.publish_inbound(InboundMessage(
                             channel=current_channel,

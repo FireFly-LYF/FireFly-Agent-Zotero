@@ -294,3 +294,107 @@ export async function syncAllLibraryPDFsToWikiRawDir(): Promise<void> {
     `[wiki-pdf-sync] done copied=${copied} skipped=${skipped} removed=${removed} failed=${failed} withCollection=${withCollection} withoutCollection=${withoutCollection}`,
   );
 }
+
+async function resolveSelectedPdfAttachment(): Promise<any | null> {
+  const resolvePdfAttachmentFromItem = async (candidate: any): Promise<any | null> => {
+    if (!candidate) return null;
+    if (candidate?.isAttachment?.()) {
+      const ct = String(candidate.attachmentContentType || "").toLowerCase();
+      if (ct.includes("pdf")) return candidate;
+      return null;
+    }
+    const best = await candidate?.getBestAttachment?.();
+    if (best && best?.isAttachment?.()) {
+      const ct = String(best.attachmentContentType || "").toLowerCase();
+      if (ct.includes("pdf")) return best;
+    }
+    return null;
+  };
+
+  const resolveActiveReaderPdfAttachment = async (): Promise<any | null> => {
+    try {
+      const mainWin = Zotero.getMainWindow() as any;
+      const tabs = ztoolkit.getGlobal("Zotero_Tabs") || mainWin?.Zotero_Tabs;
+      if (!tabs) return null;
+      const tabsAny = tabs as any;
+
+      const selectedTabID =
+        tabsAny.selectedID || tabsAny._selectedID || tabsAny.selected || tabsAny._selected || null;
+      if (!selectedTabID) return null;
+
+      let tab: any = null;
+      if (typeof tabsAny.getTab === "function") {
+        tab = tabsAny.getTab(selectedTabID);
+      } else if (typeof tabsAny._getTab === "function") {
+        tab = tabsAny._getTab(selectedTabID);
+      } else if (tabsAny._tabs && typeof tabsAny._tabs === "object") {
+        tab = tabsAny._tabs[selectedTabID] || null;
+      }
+      if (!tab) return null;
+
+      const tabType = String(tab?.type || tab?.tabType || "").toLowerCase();
+      if (tabType !== "reader") return null;
+
+      const readerItemID = Number(
+        tab?.data?.itemID || tab?.itemID || tab?.data?.id || 0,
+      );
+      if (!readerItemID) return null;
+      const readerItem = Zotero.Items.get(readerItemID) as any;
+      return await resolvePdfAttachmentFromItem(readerItem);
+    } catch (e) {
+      logInfo("[wiki-pdf-sync] resolve active reader attachment failed:", String(e));
+      return null;
+    }
+  };
+
+  try {
+    // 优先使用当前激活的 reader 标签，确保与“正在阅读的文献”一致。
+    const readerAttachment = await resolveActiveReaderPdfAttachment();
+    if (readerAttachment) {
+      return readerAttachment;
+    }
+
+    const selectedItems = ztoolkit.getGlobal("ZoteroPane")?.getSelectedItems?.() ?? [];
+    const selected = selectedItems[0] ?? null;
+    if (!selected) return null;
+    return await resolvePdfAttachmentFromItem(selected);
+  } catch (e) {
+    logInfo("[wiki-pdf-sync] resolve selected attachment failed:", String(e));
+  }
+  return null;
+}
+
+export async function getCurrentWikiPdfInfoForConversion(): Promise<{
+  pdfPath: string;
+  pdfDir: string;
+  pdfName: string;
+  wikiPdfPath: string;
+} | null> {
+  const pathUtils = getPathUtils();
+  if (!pathUtils?.join) return null;
+  const wikiPdfRoot = await resolveWikiPdfRoot();
+  if (!wikiPdfRoot) return null;
+
+  const attachment = await resolveSelectedPdfAttachment();
+  if (!attachment) return null;
+
+  const sourcePath = String((await attachment.getFilePathAsync?.()) || "").trim();
+  if (!sourcePath) return null;
+
+  const parentItemID = Number((attachment?.parentItemID as number) || 0);
+  const parentItem = parentItemID > 0 ? (Zotero.Items.get(parentItemID) as any) : null;
+  const ownerItem = parentItem ?? attachment;
+  const collectionIDs = (ownerItem?.getCollections?.() as number[]) || [];
+  const collectionID = collectionIDs.length ? collectionIDs[0] : 0;
+  const segments = collectionID === 0 ? ["未分类"] : getCollectionPathSegments(collectionID);
+  const destName = buildDestinationFilename(attachment, sourcePath);
+  const destDir = pathUtils.join(wikiPdfRoot, ...segments);
+  const destPath = pathUtils.join(destDir, destName);
+
+  return {
+    pdfPath: sourcePath,
+    pdfDir: destDir,
+    pdfName: destName,
+    wikiPdfPath: destPath,
+  };
+}

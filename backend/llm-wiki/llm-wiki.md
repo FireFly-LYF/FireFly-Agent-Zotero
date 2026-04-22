@@ -3,6 +3,7 @@
 This file defines a domain-specific pattern for **paper reading and research analysis**.
 The goal is not generic note-taking, but building a persistent, evidence-traceable
 literature wiki for long-term synthesis.
+Boundary: the LLM does not ingest files into `raw/`; file placement is handled by local Zotero sync.
 
 ## Core idea
 
@@ -20,16 +21,18 @@ already materialized in the wiki layer.
 
 ### 1) Raw sources (immutable)
 
-Located under `raw/`:
+Located under `raw/` (kept consistent with local Zotero directories):
 
-- `raw/pdf/`: original papers and reports
-- `raw/markdown/`: reading notes, clipped articles, extracted text
+- `raw/pdf/`: original papers and reports (mirrors local Zotero PDF directory)
+- `raw/markdown/`: reading notes, clipped articles, extracted text (mirrors local Zotero markdown directory)
 
 Rules:
 
 - append-only
 - never modify existing files
 - every wiki claim must trace back here
+- keep folder layout and filenames aligned with local Zotero sources
+- do not move/copy/import source files into `raw/`; only process files already present
 
 ### 2) Wiki (LLM-maintained)
 
@@ -54,7 +57,7 @@ Located under `wiki/`:
 
 ### Ingest
 
-When a new paper is added:
+When a new paper has already been synchronized from local Zotero:
 
 1. Read source from `raw/pdf` or `raw/markdown`
 2. Extract:

@@ -4,6 +4,8 @@ const BRIDGE_HEALTH_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/health`;
 const BRIDGE_MESSAGE_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/message`;
 const BRIDGE_STREAM_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/stream`;
 const BRIDGE_HISTORY_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/history`;
+const BRIDGE_PDF_OPENED_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/pdf-opened`;
+const BRIDGE_CONVERT_MARKDOWN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/convert-markdown`;
 
 const HEALTH_RETRY = 40;
 const HEALTH_INTERVAL_MS = 500;
@@ -246,4 +248,84 @@ export const fetchZoteroChatHistories = async (sessionID?: string): Promise<
     return parsed.sessions ?? {};
   }
 };
+
+export async function notifyZoteroPdfOpened(payload: {
+  pdf_path?: string;
+  pdf_dir?: string;
+  pdf_name?: string;
+  wiki_pdf_path?: string;
+}) {
+  const body = JSON.stringify({
+    pdf_path: String(payload.pdf_path || "").trim(),
+    pdf_dir: String(payload.pdf_dir || "").trim(),
+    pdf_name: String(payload.pdf_name || "").trim(),
+    wiki_pdf_path: String(payload.wiki_pdf_path || "").trim(),
+  });
+  try {
+    const resp = await zoteroHttpRequest("POST", BRIDGE_PDF_OPENED_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: SEND_TIMEOUT_MS * 2,
+    });
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`Bridge pdf-opened failed: ${resp.status} ${resp.responseText}`);
+    }
+    return JSON.parse(resp.responseText || "{}");
+  } catch (_e1) {
+    const res = await fetchWithTimeout(
+      BRIDGE_PDF_OPENED_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+      SEND_TIMEOUT_MS * 2,
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Bridge pdf-opened failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  }
+}
+
+export async function convertCurrentPdfToMarkdown(payload: {
+  pdf_path?: string;
+  pdf_dir?: string;
+  pdf_name?: string;
+  wiki_pdf_path?: string;
+}) {
+  const body = JSON.stringify({
+    pdf_path: String(payload.pdf_path || "").trim(),
+    pdf_dir: String(payload.pdf_dir || "").trim(),
+    pdf_name: String(payload.pdf_name || "").trim(),
+    wiki_pdf_path: String(payload.wiki_pdf_path || "").trim(),
+  });
+  try {
+    const resp = await zoteroHttpRequest("POST", BRIDGE_CONVERT_MARKDOWN_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: SEND_TIMEOUT_MS * 8,
+    });
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`Bridge convert-markdown failed: ${resp.status} ${resp.responseText}`);
+    }
+    return JSON.parse(resp.responseText || "{}");
+  } catch (_e1) {
+    const res = await fetchWithTimeout(
+      BRIDGE_CONVERT_MARKDOWN_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+      SEND_TIMEOUT_MS * 8,
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Bridge convert-markdown failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  }
+}
 

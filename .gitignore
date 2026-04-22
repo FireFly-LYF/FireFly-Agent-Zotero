@@ -15,6 +15,10 @@ backend/nanobot/.pytest_cache/
 backend/workspace/sessions/
 backend/llm-wiki/raw/pdf/**
 !backend/llm-wiki/raw/pdf/.gitkeep
+backend/llm-wiki/raw/markdown/**
+!backend/llm-wiki/raw/markdown/.gitkeep
+backend/llm-wiki/raw/rag/**
+!backend/llm-wiki/raw/rag/.gitkeep
 
 # Environment & secrets
 .env

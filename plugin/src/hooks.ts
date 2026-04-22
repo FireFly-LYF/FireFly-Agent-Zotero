@@ -167,6 +167,7 @@ async function onNotify(
     extraData[ids[0]].type == "reader"
   ) {
     BasicExampleFactory.exampleNotifierCallback();
+    ztoolkit.log("[wiki-pdf-convert] auto conversion disabled");
   } else {
     return;
   }

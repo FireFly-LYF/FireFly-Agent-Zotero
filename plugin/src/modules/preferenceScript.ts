@@ -1,6 +1,9 @@
 import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 
+const renderedPrefsWindows = new WeakSet<Window>();
+const boundPrefsWindows = new WeakSet<Window>();
+
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
   // See addon/content/preferences.xhtml onpaneload
@@ -47,6 +50,7 @@ async function updatePrefsUI() {
   // Or bind some events to the elements
   const renderLock = ztoolkit.getGlobal("Zotero").Promise.defer();
   if (addon.data.prefs?.window == undefined) return;
+  if (renderedPrefsWindows.has(addon.data.prefs.window)) return;
   const tableHelper = new ztoolkit.VirtualizedTable(addon.data.prefs?.window)
     .setContainerId(`${config.addonRef}-table-container`)
     .setProp({
@@ -103,10 +107,12 @@ async function updatePrefsUI() {
       renderLock.resolve();
     });
   await renderLock.promise;
+  renderedPrefsWindows.add(addon.data.prefs.window);
   ztoolkit.log("Preference table rendered!");
 }
 
 function bindPrefEvents() {
+  if (boundPrefsWindows.has(addon.data.prefs!.window)) return;
   addon.data
     .prefs!.window.document?.querySelector(
       `#zotero-prefpane-${config.addonRef}-enable`,
@@ -128,4 +134,5 @@ function bindPrefEvents() {
         `Successfully changed to ${(e.target as HTMLInputElement).value}!`,
       );
     });
+  boundPrefsWindows.add(addon.data.prefs!.window);
 }

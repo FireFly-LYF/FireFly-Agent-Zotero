@@ -1,11 +1,13 @@
 import { getLocaleID } from "../utils/locale";
 import {
+  convertCurrentPdfToMarkdown,
   ensureNanobotBridgeStarted,
   fetchZoteroChatHistories,
   isBridgeHealthy,
   streamFromNanobot,
 } from "./nanobotBridge";
 import { config } from "../../package.json";
+import { getCurrentWikiPdfInfoForConversion } from "./wikiPdfSync";
 
 let bridgeHealthTimer: number | null = null;
 
@@ -270,6 +272,21 @@ export function registerLLMItemPaneSection() {
       conversationArea.style.display = "flex";
       conversationArea.style.flexDirection = "column";
       conversationArea.style.gap = "8px";
+      const SCROLL_BOTTOM_THRESHOLD_PX = 32;
+      let autoStickToBottom = true;
+      const isNearBottom = () => {
+        const distance =
+          conversationArea.scrollHeight - (conversationArea.scrollTop + conversationArea.clientHeight);
+        return distance <= SCROLL_BOTTOM_THRESHOLD_PX;
+      };
+      const scrollConversationToBottom = (force = false) => {
+        if (force || autoStickToBottom || isNearBottom()) {
+          conversationArea.scrollTop = conversationArea.scrollHeight;
+        }
+      };
+      conversationArea.addEventListener("scroll", () => {
+        autoStickToBottom = isNearBottom();
+      });
       let emptyStateEl: HTMLDivElement | null = null;
 
       function showEmptyState() {
@@ -397,6 +414,8 @@ export function registerLLMItemPaneSection() {
       type ImageContextRecord = { path: string; name: string; mime: string; previewUrl: string };
       let textContextValues: string[] = [];
       let imageContextValues: ImageContextRecord[] = [];
+      let hasReceivedLiterature = Boolean((globalThis as any).__fireflyWikiPdfReceived);
+      let isConvertingLiterature = false;
       const resolveCurrentPDFName = (): string => {
         const fallback = "当前 PDF";
         const selectedItems = ztoolkit.getGlobal("ZoteroPane")?.getSelectedItems?.() ?? [];
@@ -522,8 +541,13 @@ export function registerLLMItemPaneSection() {
         contextBar.style.justifyContent = has ? "flex-start" : "center";
         if (!has) {
           const pdfLabel = ownerDoc.createElement("span");
-          pdfLabel.textContent = "流萤在等待你的提问";
-          pdfLabel.title = "流萤在等待你的提问";
+          const idleText = isConvertingLiterature
+            ? "流萤正在阅读你的文献"
+            : hasReceivedLiterature
+              ? "流萤已经阅读了你的文献"
+              : "流萤在等待你的提问";
+          pdfLabel.textContent = idleText;
+          pdfLabel.title = idleText;
           pdfLabel.style.display = "inline-flex";
           pdfLabel.style.alignItems = "center";
           pdfLabel.style.justifyContent = "center";
@@ -639,9 +663,13 @@ export function registerLLMItemPaneSection() {
         });
       };
       syncContextBar();
+      ownerDoc.defaultView?.addEventListener("firefly-wiki-pdf-received", () => {
+        hasReceivedLiterature = true;
+        syncContextBar();
+      });
 
       const textArea = ownerDoc.createElement("textarea");
-      textArea.placeholder = "询问关于这篇论文的问题…";
+      textArea.placeholder = "流萤好奇你的疑问...";
       textArea.style.minHeight = "90px";
       textArea.style.resize = "vertical";
       textArea.style.userSelect = "text";
@@ -919,6 +947,61 @@ export function registerLLMItemPaneSection() {
         })();
       });
 
+      const convertBtn = createToolBtn("将当前文献转换为 Markdown");
+      const convertIcon = ownerDoc.createElement("img");
+      convertIcon.src = `${iconBase}/convert.svg`;
+      convertIcon.alt = "convert";
+      convertIcon.style.width = "16px";
+      convertIcon.style.height = "16px";
+      convertBtn.appendChild(convertIcon);
+      const syncConvertButtonState = () => {
+        const disabled = isConvertingLiterature;
+        convertBtn.disabled = disabled;
+        convertBtn.style.opacity = disabled ? "0.5" : "1";
+        convertBtn.style.cursor = disabled ? "not-allowed" : "pointer";
+        convertBtn.title = disabled ? "流萤正在阅读你的文献" : "将当前文献转换为 Markdown";
+      };
+      const triggerCurrentPdfMarkdownConversion = async () => {
+        if (isConvertingLiterature) return;
+        const pdfInfo = await getCurrentWikiPdfInfoForConversion();
+        if (!pdfInfo) {
+          appendBubble("system", "未找到当前条目的 PDF，无法执行 Markdown 转换");
+          return;
+        }
+        isConvertingLiterature = true;
+        syncConvertButtonState();
+        syncContextBar();
+        try {
+          await ensureNanobotBridgeStarted();
+          const result = await convertCurrentPdfToMarkdown({
+            pdf_path: pdfInfo.pdfPath,
+            pdf_dir: pdfInfo.pdfDir,
+            pdf_name: pdfInfo.pdfName,
+            wiki_pdf_path: pdfInfo.wikiPdfPath,
+          });
+          hasReceivedLiterature = true;
+          (globalThis as any).__fireflyWikiPdfReceived = true;
+          ownerDoc.defaultView?.dispatchEvent(new CustomEvent("firefly-wiki-pdf-received"));
+          const markdownPath = String((result as any)?.markdown_path || "").trim();
+          const convertMsg =
+            String((result as any)?.reason || "").trim() === "already_converted"
+              ? `Markdown 已存在${markdownPath ? `: ${markdownPath}` : ""}`
+              : `Markdown 转换完成${markdownPath ? `: ${markdownPath}` : ""}`;
+          appendBubble("system", convertMsg);
+        } catch (e) {
+          appendBubble("system", `Markdown 转换失败: ${String((e as any)?.message || e || "")}`);
+        } finally {
+          isConvertingLiterature = false;
+          syncConvertButtonState();
+          syncContextBar();
+        }
+      };
+      convertBtn.addEventListener("click", () => {
+        if (isSending || isConvertingLiterature) return;
+        void triggerCurrentPdfMarkdownConversion();
+      });
+      syncConvertButtonState();
+
       let thinkingState: "Enable" | "Disable" = "Enable";
       const thinkingStateWrap = ownerDoc.createElement("button");
       thinkingStateWrap.type = "button";
@@ -954,7 +1037,7 @@ export function registerLLMItemPaneSection() {
       });
       syncThinkingStateUI();
       thinkingStateWrap.append(thinkingIcon);
-      leftActions.append(slashBtn, fontBtn, screenshotBtn, thinkingStateWrap);
+      leftActions.append(slashBtn, fontBtn, screenshotBtn, convertBtn, thinkingStateWrap);
 
       const sendBtn = ownerDoc.createElement("button");
       sendBtn.textContent = "Send";
@@ -1072,7 +1155,7 @@ export function registerLLMItemPaneSection() {
         row.style.cursor = "text";
         row.textContent = text;
         conversationArea.appendChild(row);
-        conversationArea.scrollTop = conversationArea.scrollHeight;
+        scrollConversationToBottom();
         return row;
       }
 
@@ -1112,7 +1195,7 @@ export function registerLLMItemPaneSection() {
 
         wrap.append(bubble, meta);
         conversationArea.appendChild(wrap);
-        conversationArea.scrollTop = conversationArea.scrollHeight;
+        scrollConversationToBottom(true);
         return { wrap, bubble };
       }
 
@@ -1164,6 +1247,81 @@ export function registerLLMItemPaneSection() {
             return `　　${normalized}`;
           })
           .join("\n");
+      }
+
+      function escapeHtml(raw: string): string {
+        return String(raw || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+      }
+
+      function renderInlineMarkdownLite(raw: string): string {
+        let text = escapeHtml(raw || "");
+        text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
+          return `<a href="${url}" target="_blank" style="color: inherit; text-decoration: underline;">${label}</a>`;
+        });
+        text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
+        text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+        return text;
+      }
+
+      function renderMarkdownLite(raw: string): string {
+        const src = String(raw || "").replace(/\r\n/g, "\n").trim();
+        if (!src) return "";
+        const lines = src.split("\n");
+        const out: string[] = [];
+        let inCode = false;
+        for (const line of lines) {
+          if (/^\s*```/.test(line)) {
+            if (!inCode) {
+              inCode = true;
+              out.push('<pre style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.12); overflow:auto;"><code>');
+            } else {
+              inCode = false;
+              out.push("</code></pre>");
+            }
+            continue;
+          }
+          if (inCode) {
+            out.push(`${escapeHtml(line)}\n`);
+            continue;
+          }
+          const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+          if (heading) {
+            const level = Math.min(6, heading[1].length);
+            const size = level <= 2 ? "17px" : level <= 4 ? "15px" : "14px";
+            out.push(
+              `<div style="margin:10px 0 6px; font-weight:700; font-size:${size};">${renderInlineMarkdownLite(
+                heading[2],
+              )}</div>`,
+            );
+            continue;
+          }
+          const list = line.match(/^\s*[-*•]\s+(.*)$/);
+          if (list) {
+            out.push(`<div style="margin:2px 0 2px 0;">• ${renderInlineMarkdownLite(list[1])}</div>`);
+            continue;
+          }
+          const quote = line.match(/^\s*>\s?(.*)$/);
+          if (quote) {
+            out.push(
+              `<div style="margin:4px 0; padding-left:8px; border-left:2px solid rgba(127,127,127,0.35); opacity:0.9;">${renderInlineMarkdownLite(
+                quote[1],
+              )}</div>`,
+            );
+            continue;
+          }
+          if (!line.trim()) {
+            out.push("<div style=\"height:6px;\"></div>");
+            continue;
+          }
+          out.push(`<div>${renderInlineMarkdownLite(line)}</div>`);
+        }
+        if (inCode) {
+          out.push("</code></pre>");
+        }
+        return out.join("");
       }
 
       function appendAssistantShell(modelLabelText: string) {
@@ -1266,6 +1424,8 @@ export function registerLLMItemPaneSection() {
         (answerBubble.style as any).MozUserSelect = "text";
         answerBubble.style.cursor = "text";
         answerBubble.style.color = "inherit";
+        answerBubble.style.fontFamily =
+          "'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Segoe UI', 'Segoe UI Symbol', sans-serif";
         const typingDots = ownerDoc.createElement("div");
         typingDots.style.display = "inline-flex";
         typingDots.style.alignItems = "center";
@@ -1294,7 +1454,11 @@ export function registerLLMItemPaneSection() {
           const val = String(text || "");
           const has = !!val.trim();
           setTypingVisible(!has);
-          answerBubble.textContent = has ? val : " ";
+          if (has) {
+            answerBubble.innerHTML = renderMarkdownLite(val);
+          } else {
+            answerBubble.textContent = " ";
+          }
           if (has) {
             answerBubble.style.background = answerBubbleBg;
           }
@@ -1302,32 +1466,50 @@ export function registerLLMItemPaneSection() {
 
         wrap.append(modelLabel, thinkingWrap, answerBubble);
         conversationArea.appendChild(wrap);
-        conversationArea.scrollTop = conversationArea.scrollHeight;
+        scrollConversationToBottom();
+
+        let hasThinkingContent = false;
+        const setThinking = (t: string, options?: { clearWhenEmpty?: boolean }) => {
+          const clearWhenEmpty = Boolean(options?.clearWhenEmpty);
+          const val = (t || "").trim();
+          if (!val) {
+            if (clearWhenEmpty || !hasThinkingContent) {
+              thinkingWrap.style.display = "none";
+              thinkingBody.textContent = " ";
+              hasThinkingContent = false;
+            }
+            return;
+          }
+          hasThinkingContent = true;
+          thinkingWrap.style.display = "block";
+          // thinking 流式阶段与最终阶段统一走同一格式化逻辑，避免字体观感不一致。
+          thinkingBody.textContent = formatThinkingParagraphs(val);
+          // 一旦开始输出 thinking，立刻隐藏等待中的三个点。
+          setTypingVisible(false);
+        };
 
         return {
           wrap,
           answerBubble,
           thinkingWrap,
           thinkingBody,
-          setThinking: (t: string) => {
-            const val = (t || "").trim();
-            if (!val) {
-              thinkingWrap.style.display = "none";
-              thinkingBody.textContent = " ";
-              return;
-            }
-            thinkingWrap.style.display = "block";
-            thinkingBody.textContent = formatThinkingParagraphs(val);
-            // 一旦开始输出 thinking，立刻隐藏等待中的三个点。
-            setTypingVisible(false);
-          },
+          setThinking,
           setAnswerText,
           setTypingVisible,
         };
       }
 
       function normalizeDisplayText(text: string) {
-        return String(text || "").replace(/^\[zotero_current_item_id=\d+\]\n?/, "").trim();
+        let normalized = String(text || "");
+        // 去除后端注入的条目上下文标记。
+        normalized = normalized.replace(/^\[zotero_current_item_id=\d+\]\s*\n?/m, "");
+        // 去除前端附加给后端的当前文献路径标记。
+        normalized = normalized.replace(/^\[zotero_current_wiki_pdf_path=.*?\]\s*\n?/m, "");
+        // 去除仅用于检索的 RAG 注入块，避免恢复历史时污染用户可读内容。
+        normalized = normalized.replace(/\[RAG Context\][\s\S]*?\[\/RAG Context\]\s*\n*/g, "");
+        // 去除可能残留的文本上下文包裹标签，仅保留用户输入主问题。
+        normalized = normalized.replace(/\[Text Context\][\s\S]*?\[\/Text Context\]\s*\n*/g, "");
+        return normalized.trim();
       }
 
       function renderActiveTabConversation() {
@@ -1416,7 +1598,17 @@ export function registerLLMItemPaneSection() {
         }
         const contextPayload = buildContextPayload();
         const baseMessage = contextPayload ? `${contextPayload}${message}` : message;
-        const messageWithContext = baseMessage || (mediaPaths.length > 0 ? "[Image Context Attached]" : "");
+        let messageWithContext = baseMessage || (mediaPaths.length > 0 ? "[Image Context Attached]" : "");
+        try {
+          // 为后端 bridge 提供“当前打开文献”定位信息，用于定向 RAG 检索。
+          const currentWikiPdfInfo = await getCurrentWikiPdfInfoForConversion();
+          const currentWikiPdfPath = String(currentWikiPdfInfo?.wikiPdfPath || "").trim();
+          if (currentWikiPdfPath) {
+            messageWithContext = `[zotero_current_wiki_pdf_path=${currentWikiPdfPath}]\n${messageWithContext}`;
+          }
+        } catch {
+          // ignore: 当前文献信息获取失败时保持原始提问链路
+        }
         textArea.value = "";
         const userDisplayText =
           message || (mediaPaths.length > 0 ? `[已附带 ${mediaPaths.length} 张图片]` : "(空消息)");
@@ -1443,7 +1635,7 @@ export function registerLLMItemPaneSection() {
                 assistant.setThinking(parsedLive.thinking);
               }
               assistant.setAnswerText(parsedLive.answer || "");
-              conversationArea.scrollTop = conversationArea.scrollHeight;
+              scrollConversationToBottom();
             },
             (finalContent) => {
               if (finalContent) {
@@ -1461,7 +1653,7 @@ export function registerLLMItemPaneSection() {
                   }
                 }
                 assistant.setAnswerText(splitThinkingAndAnswer(streamedText).answer || "");
-                conversationArea.scrollTop = conversationArea.scrollHeight;
+                scrollConversationToBottom();
               }
             },
             (thinkingDelta) => {
@@ -1470,7 +1662,7 @@ export function registerLLMItemPaneSection() {
               }
               streamedThinking += thinkingDelta;
               assistant.setThinking(streamedThinking);
-              conversationArea.scrollTop = conversationArea.scrollHeight;
+              scrollConversationToBottom();
             },
             activeStreamAbortController.signal,
           );
@@ -1480,9 +1672,9 @@ export function registerLLMItemPaneSection() {
               .filter((s) => !!s && s.trim())
               .join("\n\n")
               .trim();
-            assistant.setThinking(mergedThinking);
+            assistant.setThinking(mergedThinking, { clearWhenEmpty: true });
           } else {
-            assistant.setThinking("");
+            assistant.setThinking("", { clearWhenEmpty: true });
           }
           if (parsed.answer) {
             assistant.setAnswerText(parsed.answer);

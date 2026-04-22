@@ -4,14 +4,15 @@
 
 这个版本专门面向“论文阅读 -> 主题分析 -> 结论追踪”。  
 目标是让 LLM 持续维护一个可追溯的文献 wiki，而不是每次问题都临时检索。
+边界：LLM 不负责将 PDF/Markdown 文件放入 `raw/`，仅处理已由本地 Zotero 同步好的资料。
 
 ## 目录结构
 
 ```text
 backend/llm-wiki/
-  raw/                    # 原始资料层（不可变）
-    pdf/                  # 论文 PDF
-    markdown/             # 笔记/剪藏/提取文本
+  raw/                    # 原始资料层（不可变，与本地 Zotero 目录一致）
+    pdf/                  # 论文 PDF（与本地 Zotero 对应目录一致）
+    markdown/             # 笔记/剪藏/提取文本（与本地 Zotero 对应目录一致）
   wiki/                   # LLM 维护层
     entities/             # 论文、作者、机构、数据集
     concepts/             # 方法与框架
@@ -26,7 +27,7 @@ backend/llm-wiki/
 
 ### 1) Ingest（导入文献）
 
-当你放入 `raw/pdf/*.pdf` 或 `raw/markdown/*.md` 后，LLM 应：
+当 `raw/pdf/*.pdf` 或 `raw/markdown/*.md` 已由本地 Zotero 同步完成后（两者应与本地 Zotero 目录保持一致），LLM 应：
 
 1. 读取原始资料（只读，不改）
 2. 提取研究问题、方法、实验设置、关键结果、局限性
@@ -64,4 +65,6 @@ backend/llm-wiki/
 - 每次优先导入“高信息密度”论文（survey、benchmark、SOTA）
 - 方法结论必须绑定实验设置，避免脱离上下文
 - 每周做一次 lint，保持 wiki 可用性
+- `raw/pdf` 与 `raw/markdown` 作为本地 Zotero 资料的同步镜像目录，目录结构与文件命名应保持一致
+- 文件搬运与同步由外部流程负责（如 Zotero 同步脚本）；LLM 仅消费 `raw/` 中已存在的文件
 
