@@ -1,0 +1,245 @@
+"""用于组装 Agent 提示词的上下文构建器。"""
+
+import base64
+import mimetypes
+import platform
+import re
+from pathlib import Path
+from typing import Any
+
+from firefly.utils.helpers import current_time_str
+
+from firefly.agent.memory import MemoryStore
+from firefly.utils.prompt_templates import render_template
+from firefly.agent.skills import SkillsLoader
+from firefly.utils.helpers import build_assistant_message, detect_image_mime
+
+
+class ContextBuilder:
+    """为 Agent 构建上下文（系统提示词 + 消息列表）。"""
+
+    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
+    _MAX_RECENT_HISTORY = 50
+    _RUNTIME_CONTEXT_END = "[/Runtime Context]"
+    _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+        self.workspace = workspace
+        self.timezone = timezone
+        self.memory = MemoryStore(workspace)
+        self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        channel: str | None = None,
+    ) -> str:
+        """从身份信息、引导文件、记忆与技能构建系统提示词。"""
+        parts = [self._get_identity(channel=channel)]
+
+        bootstrap = self._load_bootstrap_files()
+        if bootstrap:
+            parts.append(bootstrap)
+
+        memory = self.memory.get_memory_context()
+        if memory:
+            parts.append(f"# Memory\n\n{memory}")
+
+        always_skills = self.skills.get_always_skills()
+        if always_skills:
+            always_content = self.skills.load_skills_for_context(always_skills)
+            if always_content:
+                parts.append(f"# Active Skills\n\n{always_content}")
+
+        skills_summary = self.skills.build_skills_summary()
+        if skills_summary:
+            parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
+
+        entries = self.memory.read_unprocessed_history(since_cursor=self.memory.get_last_dream_cursor())
+        if entries:
+            capped = entries[-self._MAX_RECENT_HISTORY:]
+            parts.append("# Recent History\n\n" + "\n".join(
+                f"- [{e['timestamp']}] {e['content']}" for e in capped
+            ))
+
+        return "\n\n---\n\n".join(parts)
+
+    def _get_identity(self, channel: str | None = None) -> str:
+        """获取核心身份信息片段。"""
+        workspace_path = str(self.workspace.expanduser().resolve())
+        system = platform.system()
+        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+
+        return render_template(
+            "agent/identity.md",
+            workspace_path=workspace_path,
+            runtime=runtime,
+            platform_policy=render_template("agent/platform_policy.md", system=system),
+            channel=channel or "",
+        )
+
+    @staticmethod
+    def _build_runtime_context(
+        channel: str | None, chat_id: str | None, timezone: str | None = None,
+        session_summary: str | None = None,
+    ) -> str:
+        """构建不可信的运行时元数据块，注入到用户消息前。"""
+        lines = [f"Current Time: {current_time_str(timezone)}"]
+        if channel and chat_id:
+            lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        if session_summary:
+            lines += ["", "[Resumed Session]", session_summary]
+        return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines) + "\n" + ContextBuilder._RUNTIME_CONTEXT_END
+
+    @staticmethod
+    def _merge_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
+        if isinstance(left, str) and isinstance(right, str):
+            return f"{left}\n\n{right}" if left else right
+
+        def _to_blocks(value: Any) -> list[dict[str, Any]]:
+            if isinstance(value, list):
+                return [item if isinstance(item, dict) else {"type": "text", "text": str(item)} for item in value]
+            if value is None:
+                return []
+            return [{"type": "text", "text": str(value)}]
+
+        return _to_blocks(left) + _to_blocks(right)
+
+    def _load_bootstrap_files(self) -> str:
+        """从工作区加载全部引导文件。"""
+        parts = []
+
+        for filename in self.BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if file_path.exists():
+                content = file_path.read_text(encoding="utf-8")
+                parts.append(f"## {filename}\n\n{content}")
+
+        return "\n\n".join(parts) if parts else ""
+
+    def build_messages(
+        self,
+        history: list[dict[str, Any]],
+        current_message: str,
+        skill_names: list[str] | None = None,
+        media: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        current_role: str = "user",
+        session_summary: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """构建一次 LLM 调用所需的完整消息列表。"""
+        runtime_ctx = self._build_runtime_context(channel, chat_id, self.timezone, session_summary=session_summary)
+        user_content = self._build_user_content(current_message, media)
+
+        # 将运行时上下文与用户内容合并为一条用户消息
+        # 以避免连续同角色消息被部分提供商拒绝。
+        if isinstance(user_content, str):
+            merged = f"{runtime_ctx}\n\n{user_content}"
+        else:
+            merged = [{"type": "text", "text": runtime_ctx}] + user_content
+        messages = [
+            {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel)},
+            *history,
+        ]
+        if messages[-1].get("role") == current_role:
+            last = dict(messages[-1])
+            last["content"] = self._merge_message_content(last.get("content"), merged)
+            messages[-1] = last
+            return messages
+        messages.append({"role": current_role, "content": merged})
+        return messages
+
+    def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
+        """构建用户消息内容，可选附带 base64 编码图片。"""
+        media = media or []
+        has_inline_md_image = bool(self._MD_IMAGE_RE.search(text or ""))
+        if not media and not has_inline_md_image:
+            return text
+
+        def _image_block_from_path(path: str) -> dict[str, Any] | None:
+            p = Path(path)
+            if not p.is_file():
+                return None
+            raw = p.read_bytes()
+            # 通过魔数识别真实 MIME 类型；失败时回退到文件名猜测
+            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            if not mime or not mime.startswith("image/"):
+                return None
+            b64 = base64.b64encode(raw).decode()
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+                "_meta": {"path": str(p)},
+            }
+
+        # 当文本中存在 Markdown 图片引用时，按原文位置交错插入图片与文本块。
+        if has_inline_md_image:
+            blocks: list[dict[str, Any]] = []
+            cursor = 0
+            src = text or ""
+            for match in self._MD_IMAGE_RE.finditer(src):
+                start, end = match.span()
+                if start > cursor:
+                    before = src[cursor:start]
+                    if before:
+                        blocks.append({"type": "text", "text": before})
+
+                raw_path = match.group(1).strip().strip("<>")
+                # 兼容 Markdown 图片 title：![alt](path "title")
+                if " " in raw_path and not Path(raw_path).exists():
+                    raw_path = raw_path.split(" ", 1)[0].strip()
+                block = _image_block_from_path(raw_path)
+                if block:
+                    blocks.append(block)
+                else:
+                    # 无法解析为本地图片时，保留原始 markdown，避免丢内容。
+                    blocks.append({"type": "text", "text": src[start:end]})
+                cursor = end
+
+            if cursor < len(src):
+                tail = src[cursor:]
+                if tail:
+                    blocks.append({"type": "text", "text": tail})
+
+            # 追加用户显式附带的 media（如截图/粘贴图）。
+            for path in media:
+                if block := _image_block_from_path(path):
+                    blocks.append(block)
+
+            if not blocks:
+                return text
+            return blocks
+
+        images = []
+        for path in media:
+            if block := _image_block_from_path(path):
+                images.append(block)
+        if not images:
+            return text
+        return images + [{"type": "text", "text": text}]
+
+    def add_tool_result(
+        self, messages: list[dict[str, Any]],
+        tool_call_id: str, tool_name: str, result: Any,
+    ) -> list[dict[str, Any]]:
+        """向消息列表追加一条工具结果。"""
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
+        return messages
+
+    def add_assistant_message(
+        self, messages: list[dict[str, Any]],
+        content: str | None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
+        thinking_blocks: list[dict] | None = None,
+    ) -> list[dict[str, Any]]:
+        """向消息列表追加一条助手消息。"""
+        messages.append(build_assistant_message(
+            content,
+            tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
+            thinking_blocks=thinking_blocks,
+        ))
+        return messages

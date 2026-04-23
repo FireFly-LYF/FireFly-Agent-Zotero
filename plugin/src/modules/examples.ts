@@ -76,7 +76,7 @@ export class BasicExampleFactory {
       pluginID: addon.data.config.addonID,
       src: rootURI + "content/preferences.xhtml",
       label: getString("prefs-title"),
-      image: `chrome://${addon.data.config.addonRef}/content/icons/FireFly-head.svg`,
+      image: `chrome://${addon.data.config.addonRef}/content/icons/firefly_smell.svg`,
     });
   }
 }
@@ -146,7 +146,7 @@ export class UIExampleFactory {
   @example
   static registerRightClickMenuItem() {
     // 在“条目右键菜单(item)”注册单个菜单项，点击后打开示例对话框。
-    const menuIcon = `chrome://${addon.data.config.addonRef}/content/icons/FireFly-head.svg`;
+    const menuIcon = `chrome://${addon.data.config.addonRef}/content/icons/firefly_smell.svg`;
     // item menuitem with icon
     ztoolkit.Menu.register("item", {
       tag: "menuitem",

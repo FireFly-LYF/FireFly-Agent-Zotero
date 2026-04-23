@@ -9,7 +9,7 @@ import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { registerLLMItemPaneSection } from "./modules/itemPaneLLMUI";
-import { isBridgeHealthy } from "./modules/nanobotBridge";
+import { isBridgeHealthy } from "./modules/fireflyBridge";
 import { syncAllLibraryPDFsToWikiRawDir } from "./modules/wikiPdfSync";
 
 /**
@@ -66,7 +66,7 @@ async function onStartup() {
   } catch (_e) {}
   registerLLMItemPaneSection();
   const bridgeReady = await isBridgeHealthy();
-  ztoolkit.log("[nanobotBridge] startup check:", bridgeReady ? "ready" : "offline");
+  ztoolkit.log("[fireflyBridge] startup check:", bridgeReady ? "ready" : "offline");
   void syncAllLibraryPDFsToWikiRawDir().catch((e) => {
     Zotero.logError(new Error(`[wiki-pdf-sync] startup sync failed: ${String(e)}`));
   });

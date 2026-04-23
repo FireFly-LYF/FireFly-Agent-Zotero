@@ -1,11 +1,14 @@
 import { getLocaleID } from "../utils/locale";
+import katex from "katex";
 import {
   convertCurrentPdfToMarkdown,
-  ensureNanobotBridgeStarted,
+  cancelFireFlyStream,
+  ensureFireFlyBridgeStarted,
+  fetchBridgeMeta,
   fetchZoteroChatHistories,
   isBridgeHealthy,
-  streamFromNanobot,
-} from "./nanobotBridge";
+  streamFromFireFly,
+} from "./fireflyBridge";
 import { config } from "../../package.json";
 import { getCurrentWikiPdfInfoForConversion } from "./wikiPdfSync";
 
@@ -13,7 +16,7 @@ let bridgeHealthTimer: number | null = null;
 
 /**
  * 独立的 Item Pane LLM 页面模块。
- * 负责将提问发送到本地 nanobot bridge（/zotero/message）。
+ * 负责将提问发送到本地 FireFly bridge（/zotero/message）。
  */
 export function registerLLMItemPaneSection() {
   Zotero.ItemPaneManager.registerSection({
@@ -21,11 +24,11 @@ export function registerLLMItemPaneSection() {
     pluginID: addon.data.config.addonID,
     header: {
       l10nID: getLocaleID("item-section-example1-head-text"),
-      icon: `chrome://${config.addonRef}/content/icons/FireFly-head.svg`,
+      icon: `chrome://${config.addonRef}/content/icons/firefly_smell.svg`,
     },
     sidenav: {
       l10nID: getLocaleID("item-section-example1-sidenav-tooltip"),
-      icon: `chrome://${config.addonRef}/content/icons/FireFly-head.svg`,
+      icon: `chrome://${config.addonRef}/content/icons/firefly_smell.svg`,
     },
     onRender: ({ body, item }) => {
       const w = (body.ownerDocument?.defaultView ?? Zotero.getMainWindow()) as unknown as
@@ -47,6 +50,7 @@ export function registerLLMItemPaneSection() {
       const bodyEl = body as HTMLElement;
       bodyEl.style.height = "calc(100vh - 160px)";
       bodyEl.style.minHeight = "680px";
+      bodyEl.style.minWidth = "0";
       bodyEl.style.display = "flex";
       bodyEl.style.flexDirection = "column";
 
@@ -56,6 +60,7 @@ export function registerLLMItemPaneSection() {
       root.style.gap = "10px";
       root.style.padding = "10px 0";
       root.style.height = "100%";
+      root.style.minWidth = "0";
       // Zotero pane 里部分容器默认不可选中，显式允许文本选择/复制。
       root.style.userSelect = "text";
       (root.style as any).MozUserSelect = "text";
@@ -416,6 +421,19 @@ export function registerLLMItemPaneSection() {
       let imageContextValues: ImageContextRecord[] = [];
       let hasReceivedLiterature = Boolean((globalThis as any).__fireflyWikiPdfReceived);
       let isConvertingLiterature = false;
+      let currentModelLabel = "model";
+      const refreshModelLabel = async () => {
+        try {
+          await ensureFireFlyBridgeStarted();
+          const meta = await fetchBridgeMeta();
+          const model = String(meta.model || "").trim();
+          if (model) {
+            currentModelLabel = model;
+          }
+        } catch {
+          // ignore model label refresh failures
+        }
+      };
       const resolveCurrentPDFName = (): string => {
         const fallback = "当前 PDF";
         const selectedItems = ztoolkit.getGlobal("ZoteroPane")?.getSelectedItems?.() ?? [];
@@ -546,11 +564,23 @@ export function registerLLMItemPaneSection() {
             : hasReceivedLiterature
               ? "流萤已经阅读了你的文献"
               : "流萤在等待你的提问";
-          pdfLabel.textContent = idleText;
+          const idleIcon = ownerDoc.createElement("img");
+          idleIcon.src = `chrome://${config.addonRef}/content/icons/firefly_smell.svg`;
+          idleIcon.alt = "firefly";
+          idleIcon.style.width = "28px";
+          idleIcon.style.height = "28px";
+          idleIcon.style.opacity = "1";
+          idleIcon.style.flexShrink = "0";
+
+          const idleTextEl = ownerDoc.createElement("span");
+          idleTextEl.textContent = idleText;
+          idleTextEl.style.opacity = "0.82";
+          idleTextEl.style.color = "rgba(70, 70, 70, 0.95)";
           pdfLabel.title = idleText;
           pdfLabel.style.display = "inline-flex";
           pdfLabel.style.alignItems = "center";
           pdfLabel.style.justifyContent = "center";
+          pdfLabel.style.gap = "8px";
           pdfLabel.style.flex = "1";
           pdfLabel.style.padding = "1px 0";
           pdfLabel.style.minHeight = "24px";
@@ -561,9 +591,10 @@ export function registerLLMItemPaneSection() {
           pdfLabel.style.whiteSpace = "nowrap";
           pdfLabel.style.fontSize = "12px";
           pdfLabel.style.fontWeight = "600";
-          pdfLabel.style.opacity = "0.52";
+          pdfLabel.style.opacity = "1";
           pdfLabel.style.fontStyle = "italic";
           pdfLabel.style.lineHeight = "1.2";
+          pdfLabel.append(idleIcon, idleTextEl);
           contextBar.appendChild(pdfLabel);
           return;
         }
@@ -667,6 +698,7 @@ export function registerLLMItemPaneSection() {
         hasReceivedLiterature = true;
         syncContextBar();
       });
+      void refreshModelLabel();
 
       const textArea = ownerDoc.createElement("textarea");
       textArea.placeholder = "流萤好奇你的疑问...";
@@ -972,7 +1004,7 @@ export function registerLLMItemPaneSection() {
         syncConvertButtonState();
         syncContextBar();
         try {
-          await ensureNanobotBridgeStarted();
+          await ensureFireFlyBridgeStarted();
           const result = await convertCurrentPdfToMarkdown({
             pdf_path: pdfInfo.pdfPath,
             pdf_dir: pdfInfo.pdfDir,
@@ -1116,6 +1148,19 @@ export function registerLLMItemPaneSection() {
       };
       let isSending = false;
       let activeStreamAbortController: AbortController | null = null;
+      let isCanceling = false;
+      const cancelActiveGeneration = async () => {
+        if (!isSending || isCanceling) return;
+        isCanceling = true;
+        try {
+          activeStreamAbortController?.abort();
+          await cancelFireFlyStream(getActiveSessionID());
+        } catch (e) {
+          ztoolkit.log("[llm-ui] cancel request failed:", String((e as any)?.message || e || ""));
+        } finally {
+          isCanceling = false;
+        }
+      };
       const syncSendButtonState = (sending: boolean) => {
         isSending = sending;
         sendBtn.textContent = sending ? "Cancel" : "Send";
@@ -1148,6 +1193,7 @@ export function registerLLMItemPaneSection() {
         row.style.borderRadius = "10px";
         row.style.whiteSpace = "pre-wrap";
         row.style.wordBreak = "break-word";
+        (row.style as any).overflowWrap = "anywhere";
         row.style.background =
           role === "user" ? "rgba(80, 140, 255, 0.18)" : "rgba(127, 127, 127, 0.12)";
         row.style.userSelect = "text";
@@ -1181,6 +1227,7 @@ export function registerLLMItemPaneSection() {
         bubble.style.borderRadius = "10px";
         bubble.style.whiteSpace = "pre-wrap";
         bubble.style.wordBreak = "break-word";
+        (bubble.style as any).overflowWrap = "anywhere";
         bubble.style.background = "rgba(60, 130, 255, 0.85)";
         bubble.style.color = "white";
         bubble.style.userSelect = "text";
@@ -1256,13 +1303,349 @@ export function registerLLMItemPaneSection() {
           .replace(/>/g, "&gt;");
       }
 
+      function latexToReadable(raw: string): string {
+        let out = String(raw || "");
+        out = out.replace(/\u2061/g, ""); // 去掉 OCR 常见的“函数应用”不可见字符
+        // 常见 LaTeX 符号替换
+        const symbolMap: Array<[RegExp, string]> = [
+          [/\\cdot/g, "·"],
+          [/\\times/g, "×"],
+          [/\\leq/g, "≤"],
+          [/\\geq/g, "≥"],
+          [/\\neq/g, "≠"],
+          [/\\infty/g, "∞"],
+          [/\\pi/g, "π"],
+          [/\\phi/g, "φ"],
+          [/\\tau/g, "τ"],
+          [/\\sin/g, "sin"],
+          [/\\cos/g, "cos"],
+          [/\\tan/g, "tan"],
+          [/\\cot/g, "cot"],
+          [/\\csc/g, "csc"],
+          [/\\exp/g, "exp"],
+          [/\\int/g, "∫"],
+          [/\\propto/g, "∝"],
+          [/\\quad/g, "  "],
+          [/\\,/g, " "],
+        ];
+        for (const [pattern, repl] of symbolMap) {
+          out = out.replace(pattern, repl);
+        }
+
+        // 去掉可视控制命令
+        out = out
+          .replace(/\\left/g, "")
+          .replace(/\\right/g, "")
+          .replace(/\\!/g, "")
+          .replace(/\\;/g, " ");
+
+        // 文本命令
+        out = out.replace(/\\text\{([^{}]+)\}/g, "$1");
+
+        // 递归展开常见分式/根式（浅层）
+        for (let i = 0; i < 6; i++) {
+          const before = out;
+          out = out.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1)/($2)");
+          out = out.replace(/\\sqrt\{([^{}]+)\}/g, "√($1)");
+          if (out === before) break;
+        }
+
+        // 花括号去壳，保留内容
+        out = out.replace(/[{}]/g, "");
+        // 下标写法归一：x_{opt} -> x_opt
+        out = out.replace(/_\s*\{([^{}]+)\}/g, "_$1");
+        // 压缩空白
+        out = out.replace(/[ \t]{2,}/g, " ").trim();
+        return out;
+      }
+
+      function normalizeOcrFormula(raw: string): string {
+        let out = String(raw || "").trim();
+        if (!out) return out;
+        out = out.replace(/\u2061/g, "");
+        // 常见 OCR 变量归一
+        out = out.replace(/\bAϕ\b/g, "A_{\\phi}");
+        out = out.replace(/\bXpopt\b/g, "X_{p_{opt}}");
+        out = out.replace(/ϕopt/g, "\\phi_{opt}");
+        out = out.replace(/\bfg,l\b/g, "f_{g,l}");
+        out = out.replace(/\bfg\b/g, "f_g");
+        out = out.replace(/\bτ\b/g, "\\tau");
+        out = out.replace(/Δf_s/g, "\\Delta f_s");
+        out = out.replace(/Δf/g, "\\Delta f");
+        // 清理常见误包裹，防止出现 \text{\operatorname{sinc}} 导致渲染失败。
+        out = out.replace(/\\text\{\s*\\operatorname\{sinc\}\s*\}/gi, "\\operatorname{sinc}");
+        out = out.replace(
+          /\\operatorname\{\s*\\operatorname\{sinc\}\s*\}/gi,
+          "\\operatorname{sinc}",
+        );
+        // 常见函数显式化，便于 KaTeX 识别（仅替换裸 sinc，避免重复包裹）。
+        out = out.replace(/(^|[^\\A-Za-z])sinc(?=\s*[\(\{])/g, (_m, p1) => {
+          return `${p1}\\operatorname{sinc}`;
+        });
+        out = out.replace(/([A-Za-z0-9_}\)])sin(?=[A-Za-z\\(])/g, "$1\\sin");
+        out = out.replace(/([A-Za-z0-9_}\)])cos(?=[A-Za-z\\(])/g, "$1\\cos");
+        out = out.replace(/([A-Za-z0-9_}\)])cot(?=[A-Za-z\\(])/g, "$1\\cot");
+        out = out.replace(/([A-Za-z0-9_}\)])csc(?=[A-Za-z\\(])/g, "$1\\csc");
+        return out;
+      }
+
+      function renderKatexFormula(raw: string, displayMode: boolean): string | null {
+        const src = normalizeOcrFormula(String(raw || "").trim());
+        if (!src) return null;
+        try {
+          return katex.renderToString(src, {
+            throwOnError: false,
+            strict: "ignore",
+            displayMode,
+            // MathML 在 Firefox/Zotero 中可直接渲染，不依赖额外 CSS。
+            output: "mathml",
+          });
+        } catch {
+          return null;
+        }
+      }
+
+      function splitFormulaForDisplay(raw: string): { left: string; right: string } | null {
+        const s = String(raw || "").trim();
+        if (!s || s.length <= 38) return null;
+        const patterns: RegExp[] = [
+          /\\cdot\s*\\exp/i,
+          /[·⋅×]\s*exp/i,
+          /\\cdot/i,
+          /[·⋅×]/,
+        ];
+        for (const re of patterns) {
+          const m = re.exec(s);
+          if (!m || typeof m.index !== "number") continue;
+          let cut = m.index;
+          if (/exp/i.test(m[0])) {
+            const expPos = m[0].search(/exp/i);
+            if (expPos >= 0) cut = m.index + expPos;
+          } else {
+            cut = m.index + m[0].length;
+          }
+          const left = s.slice(0, cut).trim();
+          const right = s.slice(cut).trim();
+          if (left.length >= 8 && right.length >= 8) {
+            return { left, right };
+          }
+        }
+        return null;
+      }
+
+      function applyFormulaSoftBreakHints(raw: string): string {
+        const source = String(raw || "").trim();
+        if (!source) return source;
+        if (
+          /\\begin\{aligned\}/i.test(source) ||
+          /\\end\{aligned\}/i.test(source) ||
+          /\\begin\{gathered\}/i.test(source) ||
+          /\\end\{gathered\}/i.test(source) ||
+          /\\begin\{array\}/i.test(source) ||
+          /\\end\{array\}/i.test(source)
+        ) {
+          return source;
+        }
+        const split = splitFormulaForDisplay(source);
+        if (!split) return source;
+        // 使用硬换行
+        return `\\begin{array}{c}${split.left}\\\\${split.right}\\end{array}`;
+      }
+
+      function isStandaloneFormulaLine(raw: string): boolean {
+        const line = String(raw || "").trim();
+        if (!line || line.length < 6) return false;
+        if (/^[•\-*]\s+/.test(line)) return false;
+        const hasLatexCmd = /\\(frac|sqrt|sin|cos|tan|cot|csc|int|exp|cdot|times|phi|tau|pi|leq|geq|propto)\b/.test(
+          line,
+        );
+        const hasMathStructure = /[_^]\{[^}]+\}/.test(line) || /\b[A-Za-z]+\s*[_^]\s*[A-Za-z0-9]/.test(line);
+        const hasOperator = /[=+\-−*/]/.test(line);
+        const hasMathToken = /[Α-Ωα-ωπτφϕΔ∞]|\\[A-Za-z]+/.test(line);
+        const cjkCount = (line.match(/[\u4e00-\u9fff]/g) || []).length;
+        return (hasLatexCmd || hasMathStructure || (hasOperator && hasMathToken)) && cjkCount <= 4;
+      }
+
+      function looksLikeBareFormula(raw: string): boolean {
+        const s = String(raw || "").trim();
+        if (!s || s.length < 4) return false;
+        if ((s.match(/[\u4e00-\u9fff]/g) || []).length > 2) return false;
+        const hasOp = /[=+\-−*/]/.test(s);
+        const hasToken = /[A-Za-zΑ-Ωα-ωπτφϕΔ∞]/.test(s);
+        const hasMathFn = /(sin|cos|tan|cot|csc|exp|sinc|FrFT|opt)/i.test(s);
+        return (hasOp && hasToken) || (hasMathFn && hasToken);
+      }
+
+      function formatFormulaInline(raw: string): string {
+        const source = String(raw || "").trim();
+        if (!source) return "";
+        const katexHtml = renderKatexFormula(source, false);
+        if (katexHtml) return ` <span style="font-size:1.02em;">${katexHtml}</span> `;
+        const text = latexToReadable(source).replace(/\s+/g, " ");
+        return text ? ` ${escapeHtml(text)} ` : "";
+      }
+
+      function enhanceFormulaSegmentAfterColon(text: string): string {
+        const src = String(text || "");
+        const m = src.match(/^([^:：]{0,80}[:：]\s*)(.+)$/);
+        if (!m) return escapeHtml(src);
+        const prefixRaw = String(m[1] || "");
+        const rhs = String(m[2] || "").trim();
+        let prefix = renderInlineMarkdownLite(prefixRaw);
+        // 仅在“左侧是简短公式标签”时增强渲染，避免把普通文本误判为公式。
+        const colonIdx = Math.max(prefixRaw.lastIndexOf(":"), prefixRaw.lastIndexOf("："));
+        if (colonIdx > 0) {
+          const leftLabel = prefixRaw.slice(0, colonIdx).trim();
+          const sep = prefixRaw.slice(colonIdx);
+          const cjkCount = (leftLabel.match(/[\u4e00-\u9fff]/g) || []).length;
+          const shouldFormatLeftFormula =
+            cjkCount <= 1 &&
+            (/\$/.test(leftLabel) ||
+              /^[A-Za-zΑ-Ωα-ωπτφϕΔ∞0-9_(),.\s⋅·=+\-−*/\\]+$/.test(leftLabel)) &&
+            (leftLabel.length <= 48 || /[=τϕφΔ]/.test(leftLabel));
+          if (shouldFormatLeftFormula) {
+            const leftRendered = /\$/.test(leftLabel)
+              ? renderInlineMarkdownLite(leftLabel)
+              : formatFormulaInline(leftLabel);
+            prefix = `${leftRendered}${escapeHtml(sep)}`;
+          }
+        }
+        // 若右侧已是显式 $...$ / $$...$$，必须走 inline markdown 解析，
+        // 否则会把 $ 包裹内容当裸公式传给 KaTeX 而失败。
+        if (/\$/.test(rhs)) {
+          return `${prefix}${renderInlineMarkdownLite(rhs)}`;
+        }
+        if (!looksLikeBareFormula(rhs)) {
+          return `${prefix}${renderInlineMarkdownLite(rhs)}`;
+        }
+        return `${prefix}${formatFormulaInline(rhs)}`;
+      }
+
+      function formatFormulaReadable(raw: string): string {
+        const source = String(raw || "").trim();
+        if (!source) return "";
+        const katexHtml = renderKatexFormula(source, false);
+        if (katexHtml) {
+          return ` <span style="font-size:1.02em;">${katexHtml}</span> `;
+        }
+        const text = latexToReadable(source).replace(/\s+/g, " ");
+        if (!text) return "";
+        const escaped = escapeHtml(text);
+        if (text.length >= 46) {
+          return `<div style="margin:6px 0; padding:4px 8px; border-left:2px solid rgba(127,127,127,0.35);">${escaped}</div>`;
+        }
+        return ` ${escaped} `;
+      }
+
+      function escapeFormulaWithSoftBreaks(raw: string): string {
+        const text = String(raw || "");
+        if (!text) return "";
+        // 公式较短时保持整行，避免不必要换行。
+        if (text.length <= 38) {
+          return escapeHtml(text);
+        }
+        const points = new Set<number>();
+        const expMatch = text.match(/[·⋅×]\s*exp(?=\s*[\[(])/i);
+        if (expMatch && typeof expMatch.index === "number") {
+          const expAt = expMatch.index + expMatch[0].search(/exp/i);
+          if (expAt > 0) points.add(expAt);
+        }
+        let depth = 0;
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+          if (ch === "(" || ch === "[" || ch === "{") {
+            depth++;
+            continue;
+          }
+          if (ch === ")" || ch === "]" || ch === "}") {
+            depth = Math.max(0, depth - 1);
+            continue;
+          }
+          if (depth > 0) continue;
+          if (ch === "·" || ch === "⋅" || ch === "×") {
+            points.add(i + 1);
+            continue;
+          }
+          if ((ch === "+" || ch === "−" || ch === "-") && i > 0 && i < text.length - 1) {
+            points.add(i);
+          }
+        }
+        const sorted = Array.from(points)
+          .filter((idx) => idx > 0 && idx < text.length)
+          .sort((a, b) => a - b);
+        if (!sorted.length) return escapeHtml(text);
+        let out = "";
+        let cursor = 0;
+        for (const idx of sorted) {
+          if (idx <= cursor) continue;
+          out += escapeHtml(text.slice(cursor, idx));
+          out += "<wbr>";
+          cursor = idx;
+        }
+        out += escapeHtml(text.slice(cursor));
+        return out;
+      }
+
+      function formatFormulaBlock(raw: string): string {
+        const source = String(raw || "").trim();
+        if (!source) return "";
+        const katexInput = applyFormulaSoftBreakHints(source);
+        const katexHtml = renderKatexFormula(katexInput, true);
+        if (katexHtml) {
+          return `<div style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.10); border-left:2px solid rgba(127,127,127,0.35); overflow-x:hidden; text-align:center;">${katexHtml}</div>`;
+        }
+        const text = latexToReadable(source);
+        if (!text) return "";
+        const escaped = escapeFormulaWithSoftBreaks(text).replace(/\n/g, "<br>");
+        return `<div style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.10); border-left:2px solid rgba(127,127,127,0.35); overflow-x:hidden; white-space:normal; word-break:normal; overflow-wrap:normal; text-align:center; font-family:'Consolas','Menlo','Monaco','Courier New',monospace; font-size:13px; line-height:1.65;">${escaped}</div>`;
+      }
+
       function renderInlineMarkdownLite(raw: string): string {
-        let text = escapeHtml(raw || "");
+        const src = String(raw || "");
+        // 处理显式 $...$ / $$...$$ 公式，使用线性扫描避免复杂正则导致栈溢出。
+        let text = "";
+        let i = 0;
+        while (i < src.length) {
+          const p = src.indexOf("$", i);
+          if (p < 0) {
+            text += escapeHtml(src.slice(i));
+            break;
+          }
+          if (p > i) {
+            text += escapeHtml(src.slice(i, p));
+          }
+          const isDouble = src[p + 1] === "$";
+          if (isDouble) {
+            const q = src.indexOf("$$", p + 2);
+            if (q > p + 2) {
+              text += formatFormulaReadable(src.slice(p + 2, q));
+              i = q + 2;
+              continue;
+            }
+            text += "$$";
+            i = p + 2;
+            continue;
+          }
+          const q = src.indexOf("$", p + 1);
+          if (q > p + 1) {
+            text += formatFormulaReadable(src.slice(p + 1, q));
+            i = q + 1;
+            continue;
+          }
+          text += "$";
+          i = p + 1;
+        }
         text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
           return `<a href="${url}" target="_blank" style="color: inherit; text-decoration: underline;">${label}</a>`;
         });
+        // 轻量下标渲染：将 x_opt / φ_opt / f_g 这类标记显示为下标，提升可读性。
+        text = text.replace(
+          /([A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω,]*)_([A-Za-z0-9Α-Ωα-ω]{1,16})/g,
+          "$1<sub>$2</sub>",
+        );
         text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
-        text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+        // 不展示 Markdown 加粗标记，避免出现“**目标信号位置**”这类视觉噪音。
+        text = text.replace(/\*\*([^*]+)\*\*/g, "$1");
         return text;
       }
 
@@ -1272,6 +1655,8 @@ export function registerLLMItemPaneSection() {
         const lines = src.split("\n");
         const out: string[] = [];
         let inCode = false;
+        let inMathBlock = false;
+        let mathLines: string[] = [];
         for (const line of lines) {
           if (/^\s*```/.test(line)) {
             if (!inCode) {
@@ -1287,6 +1672,30 @@ export function registerLLMItemPaneSection() {
             out.push(`${escapeHtml(line)}\n`);
             continue;
           }
+          if (line.trim() === "$" || line.trim() === "$$") {
+            if (!inMathBlock) {
+              inMathBlock = true;
+              mathLines = [];
+            } else {
+              inMathBlock = false;
+              out.push(formatFormulaBlock(mathLines.join("\n")));
+              mathLines = [];
+            }
+            continue;
+          }
+          if (inMathBlock) {
+            mathLines.push(line);
+            continue;
+          }
+          const singleLineBlockFormula = line.trim().match(/^\$\$(.+)\$\$$/);
+          if (singleLineBlockFormula) {
+            out.push(formatFormulaBlock(singleLineBlockFormula[1]));
+            continue;
+          }
+          if (isStandaloneFormulaLine(line)) {
+            out.push(formatFormulaBlock(line));
+            continue;
+          }
           const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
           if (heading) {
             const level = Math.min(6, heading[1].length);
@@ -1300,7 +1709,18 @@ export function registerLLMItemPaneSection() {
           }
           const list = line.match(/^\s*[-*•]\s+(.*)$/);
           if (list) {
-            out.push(`<div style="margin:2px 0 2px 0;">• ${renderInlineMarkdownLite(list[1])}</div>`);
+            const item = String(list[1] || "");
+            if (/[:：]/.test(item)) {
+              out.push(`<div style="margin:2px 0 2px 0;">• ${enhanceFormulaSegmentAfterColon(item)}</div>`);
+            } else if (/\$/.test(item)) {
+              // 显式 $...$ / $$...$$ 在列表项里优先按 markdown 公式解析，
+              // 避免被裸公式分支误判后直接送入 KaTeX 导致失败。
+              out.push(`<div style="margin:2px 0 2px 0;">• ${renderInlineMarkdownLite(item)}</div>`);
+            } else if (looksLikeBareFormula(item)) {
+              out.push(`<div style="margin:2px 0 2px 0;">• ${formatFormulaInline(item)}</div>`);
+            } else {
+              out.push(`<div style="margin:2px 0 2px 0;">• ${renderInlineMarkdownLite(item)}</div>`);
+            }
             continue;
           }
           const quote = line.match(/^\s*>\s?(.*)$/);
@@ -1317,6 +1737,9 @@ export function registerLLMItemPaneSection() {
             continue;
           }
           out.push(`<div>${renderInlineMarkdownLite(line)}</div>`);
+        }
+        if (inMathBlock && mathLines.length) {
+          out.push(formatFormulaBlock(mathLines.join("\n")));
         }
         if (inCode) {
           out.push("</code></pre>");
@@ -1389,6 +1812,7 @@ export function registerLLMItemPaneSection() {
         thinkingBody.style.marginTop = "4px";
         thinkingBody.style.whiteSpace = "pre-wrap";
         thinkingBody.style.wordBreak = "break-word";
+        (thinkingBody.style as any).overflowWrap = "anywhere";
         thinkingBody.style.fontSize = "13px";
         thinkingBody.style.lineHeight = "1.7";
         thinkingBody.style.opacity = "0.78";
@@ -1415,6 +1839,7 @@ export function registerLLMItemPaneSection() {
         answerBubble.style.borderRadius = "10px";
         answerBubble.style.whiteSpace = "pre-wrap";
         answerBubble.style.wordBreak = "break-word";
+        (answerBubble.style as any).overflowWrap = "anywhere";
         answerBubble.style.background = "transparent";
         answerBubble.style.fontSize = "15px";
         answerBubble.style.lineHeight = "1.72";
@@ -1512,6 +1937,24 @@ export function registerLLMItemPaneSection() {
         return normalized.trim();
       }
 
+      function sanitizeAssistantText(text: string): string {
+        let sanitized = normalizeDisplayText(text);
+        // 去除模型偶发输出的“技术解释行”，避免把 RAG 实现细节暴露给用户。
+        const noisyLinePatterns = [
+          /.*从\s*RAG\s*上下文可见.*$/gim,
+          /.*根据\s*RAG\s*(上下文|检索|片段).*$\n?/gim,
+          /.*以下(?:内容|片段).*来自.*RAG.*$/gim,
+          /.*source:\s*.*$/gim,
+          /.*检索片段.*$/gim,
+          /.*RAG\s*Context.*$/gim,
+        ];
+        for (const pattern of noisyLinePatterns) {
+          sanitized = sanitized.replace(pattern, "");
+        }
+        sanitized = sanitized.replace(/\n{3,}/g, "\n\n").trim();
+        return sanitized;
+      }
+
       function renderActiveTabConversation() {
         conversationArea.replaceChildren();
         emptyStateEl = null;
@@ -1525,20 +1968,22 @@ export function registerLLMItemPaneSection() {
             appendUserMessage(normalizeDisplayText(record.content));
             continue;
           }
-          const assistant = appendAssistantShell("qwen3-vl-235b-a22b-thinking");
+          const assistant = appendAssistantShell(currentModelLabel);
           const parsed = splitThinkingAndAnswer(record.content || "");
           const mergedThinking = [record.reasoning_content || "", parsed.thinking]
             .filter((s) => !!s && s.trim())
             .join("\n\n")
             .trim();
           assistant.setThinking(mergedThinking);
-          assistant.setAnswerText(parsed.answer || normalizeDisplayText(record.content) || " ");
+          assistant.setAnswerText(
+            sanitizeAssistantText(parsed.answer || normalizeDisplayText(record.content) || " ") || " ",
+          );
         }
       }
 
       async function restoreChatHistories() {
         try {
-          await ensureNanobotBridgeStarted();
+          await ensureFireFlyBridgeStarted();
           const sessions = await fetchZoteroChatHistories();
           for (let tabId = 1; tabId <= MAX_CHAT_TABS; tabId++) {
             const key = getSessionIDByTab(tabId);
@@ -1618,12 +2063,12 @@ export function registerLLMItemPaneSection() {
         syncSendButtonState(true);
         ztoolkit.log("[llm-ui] sending:", messageWithContext);
         try {
-          await ensureNanobotBridgeStarted();
+          await ensureFireFlyBridgeStarted();
           const streamSessionID = getActiveSessionID();
-          const assistant = appendAssistantShell("qwen3-vl-235b-a22b-thinking");
+          const assistant = appendAssistantShell(currentModelLabel);
           let streamedText = "";
           let streamedThinking = "";
-          await streamFromNanobot(
+          await streamFromFireFly(
             messageWithContext,
             streamSessionID,
             thinkingState,
@@ -1634,7 +2079,7 @@ export function registerLLMItemPaneSection() {
               if (thinkingState === "Enable") {
                 assistant.setThinking(parsedLive.thinking);
               }
-              assistant.setAnswerText(parsedLive.answer || "");
+              assistant.setAnswerText(sanitizeAssistantText(parsedLive.answer || ""));
               scrollConversationToBottom();
             },
             (finalContent) => {
@@ -1652,7 +2097,9 @@ export function registerLLMItemPaneSection() {
                     assistant.setThinking(mergedThinking);
                   }
                 }
-                assistant.setAnswerText(splitThinkingAndAnswer(streamedText).answer || "");
+                assistant.setAnswerText(
+                  sanitizeAssistantText(splitThinkingAndAnswer(streamedText).answer || ""),
+                );
                 scrollConversationToBottom();
               }
             },
@@ -1677,18 +2124,18 @@ export function registerLLMItemPaneSection() {
             assistant.setThinking("", { clearWhenEmpty: true });
           }
           if (parsed.answer) {
-            assistant.setAnswerText(parsed.answer);
+            assistant.setAnswerText(sanitizeAssistantText(parsed.answer));
           }
           if (!streamedText.trim()) {
             assistant.setAnswerText("(无输出)");
           }
           const finalParsed = splitThinkingAndAnswer(streamedText);
+          const cleanAnswer = sanitizeAssistantText(
+            finalParsed.answer || String(assistant.answerBubble.textContent || "").trim(),
+          );
           getTabHistory(activeTabId).push({
             role: "assistant",
-            content:
-              finalParsed.answer ||
-              String(assistant.answerBubble.textContent || "").trim() ||
-              "(无输出)",
+            content: cleanAnswer || "(无输出)",
             reasoning_content:
               thinkingState === "Enable"
                 ? [streamedThinking, finalParsed.thinking].filter((s) => !!s && s.trim()).join("\n\n")
@@ -1720,7 +2167,7 @@ export function registerLLMItemPaneSection() {
       });
       sendBtn.addEventListener("click", () => {
         if (isSending) {
-          activeStreamAbortController?.abort();
+          void cancelActiveGeneration();
           return;
         }
         void sendCurrentMessage();
@@ -1728,7 +2175,7 @@ export function registerLLMItemPaneSection() {
       // 兜底：部分 Zotero pane 场景下 addEventListener click 可能不稳定，保留 onclick 保障可触发。
       sendBtn.onclick = () => {
         if (isSending) {
-          activeStreamAbortController?.abort();
+          void cancelActiveGeneration();
           return;
         }
         void sendCurrentMessage();
