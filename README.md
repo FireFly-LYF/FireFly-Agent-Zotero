@@ -29,4 +29,7 @@
 4、下一步加入LLM wiki联合检索。
 
 2026.5.7  
-1、LLM wiki 维护层与 `raw/markdown/` 目录镜像：每篇文献对应 `wiki/` 下同路径单个 `.md`（内部分区见 `wiki/_templates/paper.md`）；跨篇放在 `wiki/_synthesis/`；已更新 `backend/llm-wiki` 下规范文档。
+1、修复了公式显示bug，现在文本内的少字公式都会被正常解析;   
+2、修改了llm wiki的目录设置，现在为每篇文章一个wiki与多篇共用的_synthesis;   
+3、发现了markdown->rag切分时，存在不严格按照标题号切分的问题，
+   该问题导致大段文字无法召回。
