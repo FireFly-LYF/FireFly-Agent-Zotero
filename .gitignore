@@ -103,6 +103,12 @@ tmp/
 temp/
 *.tmp
 
+# Test scripts
+backend/FireFly/test_*.py
+backend/FireFly/check_*.py
+backend/FireFly/reconvert_*.py
+backend/FireFly/find_*.py
+
 # OS files
 .DS_Store
 .AppleDouble

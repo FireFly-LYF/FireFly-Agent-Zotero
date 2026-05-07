@@ -37,6 +37,7 @@ from rich.table import Table
 from rich.text import Text
 
 from firefly import __logo__, __version__
+from firefly.skills.markdown.scripts.rag_utils import retrieve_rag_chunks_with_chapter_expansion
 
 
 class SafeFileHistory(FileHistory):
@@ -262,6 +263,30 @@ def version_callback(value: bool):
     if value:
         console.print(f"{__logo__} v{__version__}")
         raise typer.Exit()
+
+
+def _literature_title_from_bridge_body(body: dict[str, Any] | None) -> str | None:
+    """从 Zotero bridge POST JSON 解析当前文献题名（写入会话记录，不进入 LLM）。"""
+    if not body:
+        return None
+    for key in ("literature_title", "literatureTitle", "item_title", "itemTitle"):
+        raw = body.get(key)
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if s:
+            return s
+    return None
+
+
+def _zotero_append_query_reminder(patched: str, original_user_text: str) -> str:
+    """在 RAG/条目上下文注入之后，于末尾再次强调用户原问句，减轻长历史与长 RAG 前块对短问题的压制。"""
+    o = (original_user_text or "").strip()
+    if not o or len(o) > 4000:
+        return patched
+    if "【请直接回答此问" in patched:
+        return patched
+    return f"{patched.rstrip()}\n\n----\n【请直接回答此问（优先于旧对话）】\n{o}\n"
 
 
 @app.callback()
@@ -1254,35 +1279,7 @@ def agent(
                 return any(re.search(pat, lowered) for pat in reference_patterns)
 
             def _retrieve_local_rag_chunks(query: str, rag_jsonl_path: Path, top_k: int = 6) -> list[dict[str, Any]]:
-                if not rag_jsonl_path.is_file():
-                    return []
-                tokens = _tokenize_query(query)
-                if not tokens:
-                    return []
-                try:
-                    lines = rag_jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-                except Exception:
-                    return []
-                scored: list[tuple[int, dict[str, Any]]] = []
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-                    text = str(rec.get("text", "") or "")
-                    score = 0
-                    lowered = text.lower()
-                    for tok in tokens:
-                        if tok in lowered:
-                            score += 1
-                    if score <= 0:
-                        continue
-                    scored.append((score, rec))
-                scored.sort(key=lambda x: x[0], reverse=True)
-                return [rec for _, rec in scored[: max(1, top_k)]]
+                return retrieve_rag_chunks_with_chapter_expansion(query, rag_jsonl_path, top_k=top_k)
 
             def _inject_rag_context(content: str) -> str:
                 if not content:
@@ -1303,7 +1300,7 @@ def agent(
                 block_lines = [
                     "[RAG Context]",
                     f"source: {rag_path}",
-                    "以下片段来自当前打开文献的本地 RAG 检索（按相关度排序）：",
+                    "以下片段来自当前打开文献的本地 RAG 检索（章节名优先匹配；若匹配到子章节如 4.3，则召回整个父章节 4；按 chunk_index 文档顺序排列）：",
                     "重要：RAG 识别出的公式、符号、上下标可能存在 OCR/解析误差。请先校正并优化公式表达，再给出答案，不要逐字照搬原片段。",
                     "公式输出格式要求：请优先使用标准 LaTeX；独立公式单独成行并使用 $$...$$，行内公式使用 $...$；变量下标/上标请使用规范写法（如 f_{g,l}, p_{opt}）。",
                 ]
@@ -1312,7 +1309,9 @@ def agent(
                     txt = _rewrite_chunk_image_refs_for_multimodal(txt, rec, rag_path)
                     if len(txt) > 900:
                         txt = txt[:900] + " ..."
-                    block_lines.append(f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}) ---")
+                    section_path = str(rec.get("section_path", "") or "").strip()
+                    section_info = f" section=[{section_path}]" if section_path else ""
+                    block_lines.append(f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}{section_info}) ---")
                     block_lines.append(txt)
                 block_lines.append("[/RAG Context]")
                 return f"{chr(10).join(block_lines)}\n\n{content}"
@@ -1368,11 +1367,16 @@ def agent(
                             continue
                         content = str(msg.get("content", "") or "")
                         reasoning = str(msg.get("reasoning_content", "") or "")
-                        out.append({
+                        lit = msg.get("literature_title")
+                        lit_s = str(lit).strip() if lit is not None else ""
+                        row: dict[str, str] = {
                             "role": role,
                             "content": content,
                             "reasoning_content": reasoning,
-                        })
+                        }
+                        if lit_s:
+                            row["literature_title"] = lit_s
+                        out.append(row)
                     return out
 
                 async def _health(_request: web.Request) -> web.Response:
@@ -1525,6 +1529,11 @@ def agent(
                     if not md.is_file():
                         raise FileNotFoundError(f"markdown not found for rag: {md}")
                     rag_path = _resolve_rag_jsonl_from_markdown(md)
+                    try:
+                        rag_resolved = rag_path.expanduser().resolve()
+                    except Exception:
+                        rag_resolved = rag_path.expanduser()
+                    had_prior_rag_index = rag_resolved.is_file()
                     script_path = (
                         Path(__file__).resolve().parents[1]
                         / "skills"
@@ -1540,7 +1549,7 @@ def agent(
                         "--markdown",
                         str(md),
                         "--rag",
-                        str(rag_path.expanduser().resolve()),
+                        str(rag_resolved),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -1560,8 +1569,10 @@ def agent(
                     except Exception:
                         chunk_count = 0
                     return {
-                        "rag_path": str(rag_path),
+                        "rag_path": str(rag_resolved),
                         "rag_chunk_count": chunk_count,
+                        "rag_reindexed": True,
+                        "had_prior_rag_index": had_prior_rag_index,
                     }
 
                 async def _ensure_pdf_converted(pdf_path: Path, markdown_path: Path) -> dict[str, Any]:
@@ -1633,6 +1644,11 @@ def agent(
 
                     markdown_path = _markdown_output_path(body or {}, pdf_path)
                     try:
+                        markdown_path = markdown_path.expanduser().resolve()
+                    except Exception:
+                        markdown_path = markdown_path.expanduser()
+                    # 每次点击一键转换均重建 RAG（覆盖 jsonl）；与 PDF/Markdown 是否新生成无关。
+                    try:
                         result = await _ensure_pdf_converted(pdf_path, markdown_path)
                     except Exception as exc:
                         return web.json_response(
@@ -1687,10 +1703,13 @@ def agent(
                     cached_media = _cache_zotero_media(media_paths)
                     patched = _inject_zotero_item_context(content, override or session_id)
                     patched = _inject_rag_context(patched)
+                    patched = _zotero_append_query_reminder(patched, content)
+                    lit = _literature_title_from_bridge_body(body)
                     await inbound_from_zotero.put({
                         "message": patched,
                         "session_id": override,
                         "media": cached_media,
+                        **({"literature_title": lit} if lit else {}),
                     })
                     return web.json_response({"ok": True})
 
@@ -1718,6 +1737,8 @@ def agent(
                         current_channel, current_chat_id = "cli", source_session
                     patched_content = _inject_zotero_item_context(content, source_session)
                     patched_content = _inject_rag_context(patched_content)
+                    patched_content = _zotero_append_query_reminder(patched_content, content)
+                    stream_lit = _literature_title_from_bridge_body(body)
 
                     subscriber = _stream_subscribe(current_chat_id)
                     response = web.StreamResponse(
@@ -1735,17 +1756,20 @@ def agent(
                         await response.write(packet)
 
                     from firefly.bus.events import InboundMessage
+                    stream_meta: dict[str, Any] = {
+                        "_wants_stream": True,
+                        "_source": "zotero_stream",
+                        "_thinking_state": thinking_state,
+                    }
+                    if stream_lit:
+                        stream_meta["literature_title"] = stream_lit
                     await bus.publish_inbound(InboundMessage(
                         channel=current_channel,
                         sender_id="user",
                         chat_id=current_chat_id,
                         content=patched_content,
                         media=cached_media,
-                        metadata={
-                            "_wants_stream": True,
-                            "_source": "zotero_stream",
-                            "_thinking_state": thinking_state,
-                        },
+                        metadata=stream_meta,
                     ))
 
                     try:
@@ -1848,7 +1872,8 @@ def agent(
             )
             console.print(
                 "[dim]POST JSON: {\"message\": \"...\", \"session_id\": \"optional\", "
-                "\"thinking_state\": \"Enable\"|\"Disable\"}[/dim]",
+                "\"thinking_state\": \"Enable\"|\"Disable\", "
+                "\"literature_title\": \"optional (Zotero 当前文献)\"}[/dim]",
             )
 
             async def _consume_outbound():
@@ -1927,6 +1952,7 @@ def agent(
                     try:
                         source = "zotero"
                         source_session = session_id
+                        source_lit: str | None = None
                         if interactive_console:
                             _flush_pending_tty_input()
                             # 等待用户输入前停止 spinner，避免与 prompt_toolkit 冲突
@@ -1950,15 +1976,18 @@ def agent(
                                 source = "zotero"
                                 source_session = payload.get("session_id") or session_id
                                 source_media = payload.get("media") if isinstance(payload.get("media"), list) else []
+                                source_lit = _literature_title_from_bridge_body(payload)
                                 await _print_interactive_line(f"[Zotero] {user_input}")
                             else:
                                 user_input = input_task.result()
                                 source_media = []
+                                source_lit = None
                         else:
                             payload = await inbound_from_zotero.get()
                             user_input = payload["message"]
                             source_session = payload.get("session_id") or session_id
                             source_media = payload.get("media") if isinstance(payload.get("media"), list) else []
+                            source_lit = _literature_title_from_bridge_body(payload)
                         command = user_input.strip()
                         if not command:
                             continue
@@ -1978,14 +2007,18 @@ def agent(
                             current_channel, current_chat_id = "cli", source_session
                         patched_command = _inject_zotero_item_context(command, source_session)
                         patched_command = _inject_rag_context(patched_command)
+                        patched_command = _zotero_append_query_reminder(patched_command, command)
 
+                        inbound_meta: dict[str, Any] = {"_wants_stream": True, "_source": source}
+                        if source_lit:
+                            inbound_meta["literature_title"] = source_lit
                         await bus.publish_inbound(InboundMessage(
                             channel=current_channel,
                             sender_id="user",
                             chat_id=current_chat_id,
                             content=patched_command,
                             media=[str(p).strip() for p in source_media if str(p).strip()],
-                            metadata={"_wants_stream": True, "_source": source},
+                            metadata=inbound_meta,
                         ))
 
                         await turn_done.wait()
