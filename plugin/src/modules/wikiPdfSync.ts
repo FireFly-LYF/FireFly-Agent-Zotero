@@ -398,3 +398,35 @@ export async function getCurrentWikiPdfInfoForConversion(): Promise<{
     wikiPdfPath: destPath,
   };
 }
+
+export type WikiPdfInfoForConversion = NonNullable<Awaited<ReturnType<typeof getCurrentWikiPdfInfoForConversion>>>;
+
+/**
+ * 一键转换前：若 llm-wiki/raw/pdf 下预期镜像不存在，则从 Zotero 附件路径复制过去，避免 wiki 路径与本地库脱节。
+ * @returns 是否执行了复制
+ */
+export async function ensureWikiPdfMirrorIfMissing(info: WikiPdfInfoForConversion): Promise<boolean> {
+  const ioUtils = getIOUtils();
+  if (!ioUtils?.copy) {
+    throw new Error("IOUtils.copy 不可用，无法同步 PDF 到 wiki 目录");
+  }
+  const wiki = String(info.wikiPdfPath || "").trim();
+  const src = String(info.pdfPath || "").trim();
+  if (!wiki || !src) {
+    throw new Error("缺少 wiki 目标路径或 Zotero PDF 路径");
+  }
+  if (await pathExists(wiki)) {
+    return false;
+  }
+  if (!(await pathExists(src))) {
+    throw new Error("Zotero 中的 PDF 文件不存在，无法同步到 wiki");
+  }
+  const destDir = String(info.pdfDir || "").trim();
+  if (!destDir) {
+    throw new Error("缺少 pdfDir，无法创建 wiki 子目录");
+  }
+  await ensureDir(normalizeWindowsPath(destDir));
+  await ioUtils.copy(src, wiki);
+  logInfo("[wiki-pdf-sync] mirrored missing wiki pdf:", src, "->", wiki);
+  return true;
+}

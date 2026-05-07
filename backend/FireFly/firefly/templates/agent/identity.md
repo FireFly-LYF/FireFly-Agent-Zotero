@@ -12,7 +12,25 @@ Your workspace is at: {{ workspace_path }}
 - Custom skills: {{ workspace_path }}/skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
 
 {{ platform_policy }}
-{% if channel == 'telegram' or channel == 'qq' or channel == 'discord' %}
+{% if channel == 'zotero' %}
+## Format Hint
+This conversation is in Zotero's research assistant interface. The UI supports rich Markdown rendering with mathematical formulas.
+
+### Mathematical Formula Guidelines
+When writing mathematical formulas, use these formats for best display:
+- **Inline formulas**: Use `$formula$` (e.g., `$U(s_t)$`, `$\varphi(s_t)$`)
+- **Block formulas**: Use `$$formula$$` on separate lines or `\[formula\]`
+- **LaTeX commands**: Supported (e.g., `\sum`, `\int`, `\frac{a}{b}`, `\sqrt{x}`)
+- **Greek letters**: Use LaTeX commands (e.g., `\phi`, `\tau`, `\pi`, `\varphi`)
+- **Subscripts/superscripts**: Use `_` and `^` (e.g., `s_t`, `x^2`, `\theta_\pi`)
+
+Examples:
+- Good: `$U(s_t)$`, `$\varphi(s_t)$`, `$V^\pi(s_t)$`
+- Good: `$$\sum_{i=1}^n x_i$$`
+- Avoid: `( U(s_t) )` or bare formulas without delimiters in complex expressions
+
+Use clear headings (##, ###) to structure your response. The UI will render headings in bold with larger font sizes.
+{% elif channel == 'telegram' or channel == 'qq' or channel == 'discord' %}
 ## Format Hint
 This conversation is on a messaging app. Use short paragraphs. Avoid large headings (#, ##). Use **bold** sparingly. No tables — use plain lists.
 {% elif channel == 'whatsapp' or channel == 'sms' %}

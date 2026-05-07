@@ -1,6 +1,7 @@
 """firefly 的命令行（CLI）命令集合。"""
 
 import asyncio
+import json
 import os
 import select
 import signal
@@ -227,6 +228,14 @@ def _is_exit_command(command: str) -> bool:
     return command.lower() in EXIT_COMMANDS
 
 
+def _has_interactive_console() -> bool:
+    """检查当前进程是否具备可交互控制台（stdin/stdout 均为 TTY）。"""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
 async def _read_interactive_input_async() -> str:
     """使用 prompt_toolkit 读取用户输入（处理粘贴、历史、显示等）。
 
@@ -377,10 +386,16 @@ def onboard(
     # 记录本次 onboard 生成/使用的 config 与 workspace，便于后续启动自动定位。
     try:
         write_project_context(
-            base_dir=config_path.parent,
             config_path=config_path,
             workspace=workspace_path,
         )
+    except Exception:
+        pass
+
+    try:
+        from firefly.config.cli_prefs import ensure_cli_prefs_file
+
+        ensure_cli_prefs_file(config_path)
     except Exception:
         pass
 
@@ -939,6 +954,21 @@ def agent(
     else:
         logger.disable("firefly")
 
+    from firefly.config.cli_prefs import load_cli_prefs
+    from firefly.config.loader import get_config_path
+
+    show_llm_from_cli = bool(load_cli_prefs(get_config_path()).get("show_llm_input"))
+    on_llm_request_cb = None
+    if show_llm_from_cli:
+        async def _cli_on_llm_request(payload: dict[str, Any]) -> None:
+            # runner 已在回调前脱敏；此处直接打印即可。
+            body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+            console.print("\n[bold yellow]LLM 请求快照[/bold yellow]")
+            console.print(body, style="dim", markup=False)
+            console.print()
+
+        on_llm_request_cb = _cli_on_llm_request
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -959,6 +989,7 @@ def agent(
         unified_session=config.agents.defaults.unified_session,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        on_llm_request=on_llm_request_cb,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
@@ -1001,6 +1032,8 @@ def agent(
     else:
         # 交互模式：像其他 channel 一样通过 bus 路由
         from firefly.bus.events import InboundMessage
+
+        interactive_console = _has_interactive_console()
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
 
@@ -1032,6 +1065,10 @@ def agent(
             turn_response: list[tuple[str, dict]] = []
             renderer: StreamRenderer | None = None
 
+            async def _stream_publish(_chat_id: str, _payload: dict[str, Any]) -> None:
+                """纯 CLI 无 Zotero SSE 订阅者；占位与 zotero 桥接分支结构一致。"""
+                return None
+
             async def _consume_outbound():
                 while True:
                     try:
@@ -1050,18 +1087,20 @@ def agent(
                         if msg.metadata.get("_streamed"):
                             if msg.content:
                                 await _stream_publish(msg.chat_id, {"type": "final", "content": msg.content})
-                                if interactive_console:
-                                    await _print_interactive_response(
-                                        msg.content,
-                                        render_markdown=markdown,
-                                        metadata=msg.metadata,
-                                    )
-                                else:
-                                    _print_agent_response(
-                                        msg.content,
-                                        render_markdown=markdown,
-                                        metadata=msg.metadata,
-                                    )
+                                # 流式已在 StreamRenderer 中输出，避免再用整段回复打印第二遍
+                                if not (renderer and renderer.streamed):
+                                    if interactive_console:
+                                        await _print_interactive_response(
+                                            msg.content,
+                                            render_markdown=markdown,
+                                            metadata=msg.metadata,
+                                        )
+                                    else:
+                                        _print_agent_response(
+                                            msg.content,
+                                            render_markdown=markdown,
+                                            metadata=msg.metadata,
+                                        )
                             turn_done.set()
                             continue
 

@@ -198,6 +198,7 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
+        on_llm_request: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ):
         from firefly.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -246,6 +247,7 @@ class AgentLoop:
             disabled_skills=disabled_skills,
         )
         self._unified_session = unified_session
+        self._on_llm_request = on_llm_request
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stacks: dict[str, AsyncExitStack] = {}
@@ -467,6 +469,7 @@ class AgentLoop:
             checkpoint_callback=_checkpoint,
             injection_callback=_drain_pending,
             on_reasoning_stream=loop_hook.on_reasoning_stream,
+            on_llm_request=self._on_llm_request,
         ))
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":

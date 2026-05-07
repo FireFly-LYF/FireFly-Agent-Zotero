@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 import inspect
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from firefly.agent.hook import AgentHook, AgentHookContext
 from firefly.utils.prompt_templates import render_template
 from firefly.agent.tools.registry import ToolRegistry
 from firefly.providers.base import LLMProvider, ToolCallRequest
+from firefly.config.cli_prefs import load_cli_prefs
+from firefly.utils.llm_display_compose import build_llm_display_payload
 from firefly.utils.helpers import (
     build_assistant_message,
     estimate_message_tokens,
@@ -46,6 +49,7 @@ _COMPACTABLE_TOOLS = frozenset({
     "web_search", "web_fetch", "list_dir",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
+_MAX_MESSAGE_DISPLAY_CHARS = 200_000
 
 
 
@@ -75,6 +79,7 @@ class AgentRunSpec:
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
     on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None
+    on_llm_request: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
 
 @dataclass(slots=True)
@@ -340,7 +345,9 @@ class AgentRunner:
                 )
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=False)
-                response = await self._request_finalization_retry(spec, messages_for_model)
+                response = await self._request_finalization_retry(
+                    spec, messages_for_model, iteration=context.iteration,
+                )
                 retry_usage = self._usage_dict(response.usage)
                 self._accumulate_usage(usage, retry_usage)
                 raw_usage = self._merge_usage(raw_usage, retry_usage)
@@ -503,6 +510,92 @@ class AgentRunner:
             kwargs["reasoning_effort"] = spec.reasoning_effort
         return kwargs
 
+    @staticmethod
+    def _sanitize_content_block(block: dict[str, Any]) -> dict[str, Any]:
+        b = dict(block)
+        if b.get("type") == "image_url" and isinstance(b.get("image_url"), dict):
+            iu = dict(b["image_url"])
+            url = iu.get("url", "")
+            if isinstance(url, str) and url.startswith("data:"):
+                iu["url"] = f"[base64 image omitted, {len(url)} chars]"
+                b["image_url"] = iu
+        text_key = "text"
+        if text_key in b and isinstance(b[text_key], str):
+            t = b[text_key]
+            if len(t) > _MAX_MESSAGE_DISPLAY_CHARS:
+                b[text_key] = (
+                    t[:_MAX_MESSAGE_DISPLAY_CHARS]
+                    + f"\n...[truncated, {len(t)} chars total]"
+                )
+        return b
+
+    @classmethod
+    def _sanitize_content_value(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if len(value) > _MAX_MESSAGE_DISPLAY_CHARS:
+                return (
+                    value[:_MAX_MESSAGE_DISPLAY_CHARS]
+                    + f"\n...[truncated, {len(value)} chars total]"
+                )
+            return value
+        if isinstance(value, list):
+            out: list[Any] = []
+            for item in value:
+                if isinstance(item, dict):
+                    out.append(cls._sanitize_content_block(item))
+                else:
+                    out.append(item)
+            return out
+        return value
+
+    @classmethod
+    def _sanitize_messages_for_display(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sanitized: list[dict[str, Any]] = []
+        for msg in messages:
+            m = dict(msg)
+            for key in ("content", "reasoning_content"):
+                if key in m:
+                    m[key] = cls._sanitize_content_value(m[key])
+            sanitized.append(m)
+        return sanitized
+
+    @staticmethod
+    def _prepare_llm_display_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """供 on_llm_request / 终端展示（见 ``llm_display_compose`` / ``llm_display_redact``）。"""
+        try:
+            prefs = load_cli_prefs()
+        except Exception:
+            prefs = {"show_llm_input": False}
+        return build_llm_display_payload(prefs, payload)
+
+    async def _emit_on_llm_request(
+        self,
+        spec: AgentRunSpec,
+        *,
+        phase: str,
+        iteration: int,
+        kwargs: dict[str, Any],
+    ) -> None:
+        cb = spec.on_llm_request
+        if cb is None:
+            return
+        payload: dict[str, Any] = {
+            "phase": phase,
+            "iteration": iteration,
+            "model": kwargs.get("model"),
+            "messages": self._sanitize_messages_for_display(list(kwargs.get("messages") or [])),
+            "tools": kwargs.get("tools"),
+            "temperature": kwargs.get("temperature"),
+            "max_tokens": kwargs.get("max_tokens"),
+            "reasoning_effort": kwargs.get("reasoning_effort"),
+            "provider_retry_mode": kwargs.get("retry_mode"),
+        }
+        display_payload = self._prepare_llm_display_payload(payload)
+        try:
+            await cb(display_payload)
+        except Exception:
+            logger.exception("on_llm_request callback failed; continuing with LLM call")
+
     async def _request_model(
         self,
         spec: AgentRunSpec,
@@ -519,6 +612,12 @@ class AgentRunner:
             spec,
             messages,
             tools=spec.tools.get_definitions(),
+        )
+        await self._emit_on_llm_request(
+            spec,
+            phase="primary",
+            iteration=context.iteration,
+            kwargs=kwargs,
         )
         if hook.wants_streaming():
             async def _stream(delta: str) -> None:
@@ -559,10 +658,18 @@ class AgentRunner:
         self,
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
+        *,
+        iteration: int,
     ):
         retry_messages = list(messages)
         retry_messages.append(build_finalization_retry_message())
         kwargs = self._build_request_kwargs(spec, retry_messages, tools=None)
+        await self._emit_on_llm_request(
+            spec,
+            phase="finalization_retry",
+            iteration=iteration,
+            kwargs=kwargs,
+        )
         return await self.provider.chat_with_retry(**kwargs)
 
     @staticmethod

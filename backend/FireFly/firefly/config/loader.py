@@ -14,14 +14,36 @@ from firefly.config.schema import Config
 _current_config_path: Path | None = None
 
 
-def _context_file_name() -> Path:
-    return Path(".firefly") / "context.json"
+def _new_context_path(base: Path) -> Path:
+    """Project-local context next to nested config (``<base>/config/context.json``)."""
+    return base / "config" / "context.json"
+
+
+def _legacy_context_path(base: Path) -> Path:
+    return base / ".firefly" / "context.json"
+
+
+def resolve_project_base_dir(config_path: Path) -> Path:
+    """Directory that anchors ``config/`` for context and defaults.
+
+    If *config_path* lives in a folder named ``config`` (e.g. ``proj/config/config.json``),
+    the project base is the parent of that folder. Otherwise the base is the parent
+    directory of the config file (legacy ``proj/config.json``).
+    """
+    p = Path(config_path).expanduser().resolve()
+    if p.parent.name == "config":
+        return p.parent.parent
+    return p.parent
 
 
 def _find_nearest_project_base(start: Path) -> Path | None:
-    """Find nearest parent that contains a firefly context or config.json."""
+    """Find nearest parent that contains firefly config or context (new or legacy layout)."""
     for base in [start, *start.parents]:
-        if (base / _context_file_name()).is_file():
+        if (base / "config" / "context.json").is_file():
+            return base
+        if (base / "config" / "config.json").is_file():
+            return base
+        if _legacy_context_path(base).is_file():
             return base
         if (base / "config.json").is_file():
             return base
@@ -29,14 +51,15 @@ def _find_nearest_project_base(start: Path) -> Path | None:
 
 
 def _load_context(base: Path) -> dict | None:
-    path = base / _context_file_name()
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    for path in (_new_context_path(base), _legacy_context_path(base)):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            continue
+    return None
 
 
 def resolve_default_base_dir() -> Path:
@@ -45,8 +68,8 @@ def resolve_default_base_dir() -> Path:
 
     Priority:
     1) FIREFLY_HOME (explicit override)
-    2) nearest parent containing .firefly/context.json (created by onboard)
-    3) nearest parent containing config.json
+    2) nearest parent containing ``config/context.json`` (onboard) or ``config/config.json``
+    3) nearest parent containing legacy ``.firefly/context.json`` or ``config.json``
     4) cwd
     """
     custom = os.environ.get("FIREFLY_HOME", "").strip()
@@ -57,12 +80,12 @@ def resolve_default_base_dir() -> Path:
     return found.resolve() if found else cwd
 
 
-def write_project_context(*, base_dir: Path, config_path: Path, workspace: Path) -> Path:
-    """Persist the last-onboarded config/workspace for this project directory."""
-    base_dir = Path(base_dir).expanduser().resolve()
+def write_project_context(*, config_path: Path, workspace: Path) -> Path:
+    """Persist the last-onboarded config/workspace under ``<project>/config/context.json``."""
+    project_base = resolve_project_base_dir(config_path)
     config_path = Path(config_path).expanduser().resolve()
     workspace = Path(workspace).expanduser().resolve()
-    ctx_path = base_dir / _context_file_name()
+    ctx_path = _new_context_path(project_base)
     ctx_path.parent.mkdir(parents=True, exist_ok=True)
     ctx_path.write_text(
         json.dumps(
@@ -94,7 +117,13 @@ def get_config_path() -> Path:
         raw = str(ctx.get("config_path", "")).strip()
         if raw:
             return Path(raw).expanduser().resolve()
-    return base / "config.json"
+    nested = base / "config" / "config.json"
+    legacy = base / "config.json"
+    if nested.is_file():
+        return nested
+    if legacy.is_file():
+        return legacy
+    return nested
 
 
 def load_config(config_path: Path | None = None) -> Config:

@@ -6,6 +6,7 @@ const BRIDGE_STREAM_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/stream`;
 const BRIDGE_HISTORY_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/history`;
 const BRIDGE_META_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/meta`;
 const BRIDGE_CANCEL_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/cancel`;
+const BRIDGE_SESSION_CLEAR_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/session/clear`;
 const BRIDGE_PDF_OPENED_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/pdf-opened`;
 const BRIDGE_CONVERT_MARKDOWN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/convert-markdown`;
 
@@ -272,6 +273,56 @@ export async function fetchBridgeMeta(): Promise<{ model?: string; provider?: st
     return {
       model: String(parsed.model || "").trim(),
       provider: String(parsed.provider || "").trim(),
+    };
+  }
+}
+
+export async function clearZoteroSession(sessionID: string): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+  const body = JSON.stringify({
+    session_id: String(sessionID || "").trim(),
+  });
+  try {
+    const resp = await zoteroHttpRequest("POST", BRIDGE_SESSION_CLEAR_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: SEND_TIMEOUT_MS,
+    });
+    const parsed = JSON.parse(resp.responseText || "{}") as {
+      ok?: boolean;
+      session_id?: string;
+      error?: string;
+    };
+    if (resp.status < 200 || resp.status >= 300) {
+      return {
+        ok: false,
+        error: String(parsed.error || resp.responseText || `HTTP ${resp.status}`),
+      };
+    }
+    return {
+      ok: !!parsed.ok,
+      session_id: String(parsed.session_id || "").trim() || undefined,
+      error: parsed.error ? String(parsed.error) : undefined,
+    };
+  } catch (_e1) {
+    const res = await fetchWithTimeout(
+      BRIDGE_SESSION_CLEAR_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+      SEND_TIMEOUT_MS,
+    );
+    const parsed = (await res.json()) as { ok?: boolean; session_id?: string; error?: string };
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: String(parsed.error || `HTTP ${res.status}`),
+      };
+    }
+    return {
+      ok: !!parsed.ok,
+      session_id: String(parsed.session_id || "").trim() || undefined,
     };
   }
 }

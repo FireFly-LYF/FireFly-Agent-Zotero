@@ -3,6 +3,7 @@ import katex from "katex";
 import {
   convertCurrentPdfToMarkdown,
   cancelFireFlyStream,
+  clearZoteroSession,
   ensureFireFlyBridgeStarted,
   fetchBridgeMeta,
   fetchZoteroChatHistories,
@@ -10,7 +11,7 @@ import {
   streamFromFireFly,
 } from "./fireflyBridge";
 import { config } from "../../package.json";
-import { getCurrentWikiPdfInfoForConversion } from "./wikiPdfSync";
+import { ensureWikiPdfMirrorIfMissing, getCurrentWikiPdfInfoForConversion } from "./wikiPdfSync";
 
 let bridgeHealthTimer: number | null = null;
 
@@ -67,9 +68,11 @@ export function registerLLMItemPaneSection() {
 
       const topBar = ownerDoc.createElement("div");
       topBar.style.display = "flex";
-      topBar.style.justifyContent = "center";
+      topBar.style.justifyContent = "space-between";
       topBar.style.alignItems = "center";
-      topBar.style.gap = "6px";
+      topBar.style.gap = "8px";
+      topBar.style.width = "100%";
+      topBar.style.boxSizing = "border-box";
 
       type TabState = {
         id: number;
@@ -260,12 +263,47 @@ export function registerLLMItemPaneSection() {
       });
       syncAddTabButtonState();
 
-      topBar.append(tabBar, addTabBtn);
+      const tabRow = ownerDoc.createElement("div");
+      tabRow.style.display = "flex";
+      tabRow.style.alignItems = "center";
+      tabRow.style.gap = "6px";
+      tabRow.style.flex = "1";
+      tabRow.style.minWidth = "0";
+
+      const clearChatBtn = ownerDoc.createElement("button");
+      clearChatBtn.type = "button";
+      clearChatBtn.title = "清除当前对话";
+      clearChatBtn.style.display = "inline-flex";
+      clearChatBtn.style.alignItems = "center";
+      clearChatBtn.style.justifyContent = "center";
+      clearChatBtn.style.padding = "2px";
+      clearChatBtn.style.width = "28px";
+      clearChatBtn.style.height = "28px";
+      clearChatBtn.style.borderRadius = "999px";
+      clearChatBtn.style.border = "none";
+      clearChatBtn.style.background = "rgba(125, 125, 125, 0.18)";
+      clearChatBtn.style.cursor = "pointer";
+      clearChatBtn.style.flexShrink = "0";
+      clearChatBtn.style.boxSizing = "border-box";
+      const clearIcon = ownerDoc.createElement("img");
+      clearIcon.src = `chrome://${config.addonRef}/content/icons/clear.svg`;
+      clearIcon.alt = "";
+      clearIcon.style.width = "16px";
+      clearIcon.style.height = "16px";
+      clearIcon.style.display = "block";
+      clearIcon.style.opacity = "0.88";
+      clearChatBtn.appendChild(clearIcon);
+
+      tabRow.append(tabBar, addTabBtn);
+      topBar.append(tabRow, clearChatBtn);
 
       // 对话区域
       const conversationArea = ownerDoc.createElement("div");
       conversationArea.style.flex = "1";
       conversationArea.style.minHeight = "180px";
+      // 允许子项在 flex 布局下收缩，避免内层 <pre> 长行把整个面板撑出横向滚动
+      conversationArea.style.minWidth = "0";
+      conversationArea.style.overflowX = "hidden";
       conversationArea.style.border = "1px solid var(--color-border)";
       conversationArea.style.borderRadius = "10px";
       conversationArea.style.padding = "10px";
@@ -979,7 +1017,7 @@ export function registerLLMItemPaneSection() {
         })();
       });
 
-      const convertBtn = createToolBtn("将当前文献转换为 Markdown");
+      const convertBtn = createToolBtn("PDF → Markdown → RAG（一键）");
       const convertIcon = ownerDoc.createElement("img");
       convertIcon.src = `${iconBase}/convert.svg`;
       convertIcon.alt = "convert";
@@ -991,7 +1029,7 @@ export function registerLLMItemPaneSection() {
         convertBtn.disabled = disabled;
         convertBtn.style.opacity = disabled ? "0.5" : "1";
         convertBtn.style.cursor = disabled ? "not-allowed" : "pointer";
-        convertBtn.title = disabled ? "流萤正在阅读你的文献" : "将当前文献转换为 Markdown";
+        convertBtn.title = disabled ? "流萤正在处理文献…" : "将当前 PDF 转为 Markdown 并写入本地 RAG 索引";
       };
       const triggerCurrentPdfMarkdownConversion = async () => {
         if (isConvertingLiterature) return;
@@ -1005,6 +1043,16 @@ export function registerLLMItemPaneSection() {
         syncContextBar();
         try {
           await ensureFireFlyBridgeStarted();
+          let wikiMirrorJustCopied = false;
+          try {
+            wikiMirrorJustCopied = await ensureWikiPdfMirrorIfMissing(pdfInfo);
+          } catch (syncErr) {
+            appendBubble(
+              "system",
+              `无法同步 PDF 到 llm-wiki/raw/pdf：${String((syncErr as any)?.message || syncErr || "")}`,
+            );
+            return;
+          }
           const result = await convertCurrentPdfToMarkdown({
             pdf_path: pdfInfo.pdfPath,
             pdf_dir: pdfInfo.pdfDir,
@@ -1013,13 +1061,40 @@ export function registerLLMItemPaneSection() {
           });
           hasReceivedLiterature = true;
           (globalThis as any).__fireflyWikiPdfReceived = true;
-          ownerDoc.defaultView?.dispatchEvent(new CustomEvent("firefly-wiki-pdf-received"));
+          // Zotero 部分文档的 defaultView 无全局 CustomEvent，勿直接使用裸的 CustomEvent 标识符。
+          const win = ownerDoc.defaultView;
+          if (win) {
+            try {
+              const CE = (win as any).CustomEvent;
+              if (typeof CE === "function") {
+                win.dispatchEvent(new CE("firefly-wiki-pdf-received"));
+              } else {
+                const ev = ownerDoc.createEvent("CustomEvent") as any;
+                if (typeof ev?.initCustomEvent === "function") {
+                  ev.initCustomEvent("firefly-wiki-pdf-received", false, false, null);
+                  win.dispatchEvent(ev);
+                }
+              }
+            } catch (dispatchErr) {
+              ztoolkit.log("[llm-ui] firefly-wiki-pdf-received dispatch:", String(dispatchErr));
+            }
+          }
+          syncContextBar();
           const markdownPath = String((result as any)?.markdown_path || "").trim();
           const convertMsg =
             String((result as any)?.reason || "").trim() === "already_converted"
               ? `Markdown 已存在${markdownPath ? `: ${markdownPath}` : ""}`
               : `Markdown 转换完成${markdownPath ? `: ${markdownPath}` : ""}`;
-          appendBubble("system", convertMsg);
+          const ragPath = String((result as any)?.rag_path || "").trim();
+          const ragChunks = Number((result as any)?.rag_chunk_count ?? 0);
+          const ragLine =
+            Number.isFinite(ragChunks) && ragChunks > 0
+              ? `RAG 索引已更新：${ragChunks} 段${ragPath ? ` → ${ragPath}` : ""}`
+              : ragPath
+                ? `RAG 索引已更新 → ${ragPath}`
+                : "RAG 索引已更新";
+          const mirrorNote = wikiMirrorJustCopied ? "已从 Zotero 补全 wiki 目录中的 PDF 副本。\n" : "";
+          appendBubble("system", `${mirrorNote}${convertMsg}\n${ragLine}`);
         } catch (e) {
           appendBubble("system", `Markdown 转换失败: ${String((e as any)?.message || e || "")}`);
         } finally {
@@ -1181,6 +1256,31 @@ export function registerLLMItemPaneSection() {
       });
       syncSendButtonState(false);
 
+      clearChatBtn.addEventListener("mousedown", (ev) => {
+        ev.stopPropagation();
+      });
+      clearChatBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        void (async () => {
+          try {
+            if (isSending) {
+              await cancelActiveGeneration();
+              syncSendButtonState(false);
+            }
+          } catch {
+            syncSendButtonState(false);
+          }
+          chatHistoryByTab.set(activeTabId, []);
+          renderActiveTabConversation();
+          try {
+            await ensureFireFlyBridgeStarted();
+            await clearZoteroSession(getSessionIDByTab(activeTabId));
+          } catch (e) {
+            ztoolkit.log("[llm-ui] clear session failed:", String((e as any)?.message || e || ""));
+          }
+        })();
+      });
+
       composeActions.append(leftActions, sendBtn);
       composeCard.append(composeMeta, textArea, composeActions);
 
@@ -1188,6 +1288,8 @@ export function registerLLMItemPaneSection() {
         hideEmptyState();
         const row = ownerDoc.createElement("div");
         row.style.maxWidth = "90%";
+        row.style.minWidth = "0";
+        row.style.width = role === "user" ? "auto" : "100%";
         row.style.alignSelf = role === "user" ? "flex-end" : "flex-start";
         row.style.padding = "8px 10px";
         row.style.borderRadius = "10px";
@@ -1219,9 +1321,12 @@ export function registerLLMItemPaneSection() {
         wrap.style.flexDirection = "column";
         wrap.style.alignItems = "flex-end";
         wrap.style.gap = "4px";
+        wrap.style.minWidth = "0";
+        wrap.style.maxWidth = "100%";
 
         const bubble = ownerDoc.createElement("div");
         bubble.style.maxWidth = "88%";
+        bubble.style.minWidth = "0";
         bubble.style.alignSelf = "flex-end";
         bubble.style.padding = "10px 12px";
         bubble.style.borderRadius = "10px";
@@ -1248,8 +1353,8 @@ export function registerLLMItemPaneSection() {
 
       function splitThinkingAndAnswer(full: string): { thinking: string; answer: string } {
         const text = (full || "").replace(/\r\n/g, "\n");
-        // Prefer explicit tags if present.
-        const tag = text.match(/<think>([\s\S]*?)<\/think>/i);
+        // Prefer explicit tags if present（须与后端 helpers.strip_think 一致）。
+        const tag = text.match(/<think>([\s\S]*?)<\/redacted_thinking>/i);
         if (tag) {
           const thinking = String(tag[1] || "").trim();
           const answer = text.replace(tag[0], "").trim();
@@ -1454,49 +1559,104 @@ export function registerLLMItemPaneSection() {
 
       function isStandaloneFormulaLine(raw: string): boolean {
         const line = String(raw || "").trim();
-        if (!line || line.length < 6) return false;
+        if (!line || line.length < 2) return false;
         if (/^[•\-*]\s+/.test(line)) return false;
-        const hasLatexCmd = /\\(frac|sqrt|sin|cos|tan|cot|csc|int|exp|cdot|times|phi|tau|pi|leq|geq|propto)\b/.test(
+        // 有序列表行（含缩进）不应整行进块级公式，否则 ** 与正文会进 KaTeX 乱显。
+        if (/^\d{1,2}\.\s+/.test(line)) return false;
+        // 含明显 Markdown 加粗且中文较多时，更像正文小标题而非独立公式。
+        if (/\*\*[^*]+\*\*/.test(line) && (line.match(/[\u4e00-\u9fff]/g) || []).length > 6) {
+          return false;
+        }
+        
+        // 包含 LaTeX 命令
+        const hasLatexCmd = /\\(frac|sqrt|sin|cos|tan|cot|csc|int|exp|cdot|times|phi|tau|pi|leq|geq|propto|sum|prod|varphi)\b/.test(
           line,
         );
+        
+        // 包含数学结构（下标/上标）
         const hasMathStructure = /[_^]\{[^}]+\}/.test(line) || /\b[A-Za-z]+\s*[_^]\s*[A-Za-z0-9]/.test(line);
+        
+        // 包含希腊字母或数学符号
+        const hasGreekOrSymbol = /[Α-Ωα-ωπτφϕΔ∞∑∏∫]/.test(line);
+        
+        // 包含括号内的下标，如 φ(st)、V(st)、P(st+1|st,at)
+        const hasFunctionNotation = /[A-Za-zΑ-Ωα-ωπτφϕ]\([A-Za-z0-9_+\-,|∣]+\)/.test(line);
+        
+        // 包含运算符
         const hasOperator = /[=+\-−*/]/.test(line);
+        
+        // 包含数学符号
         const hasMathToken = /[Α-Ωα-ωπτφϕΔ∞]|\\[A-Za-z]+/.test(line);
+        
+        // 中文字符数量
         const cjkCount = (line.match(/[\u4e00-\u9fff]/g) || []).length;
-        return (hasLatexCmd || hasMathStructure || (hasOperator && hasMathToken)) && cjkCount <= 4;
+        
+        // 判断逻辑：
+        // 1. 有 LaTeX 命令 或 数学结构 → 很可能是公式
+        // 2. 有希腊字母 或 函数记号 → 很可能是公式
+        // 3. 有运算符 + 数学符号，且中文不多 → 可能是公式
+        return (
+          (hasLatexCmd || hasMathStructure || hasGreekOrSymbol || hasFunctionNotation) ||
+          (hasOperator && hasMathToken && cjkCount <= 4)
+        );
       }
 
       function looksLikeBareFormula(raw: string): boolean {
         const s = String(raw || "").trim();
-        if (!s || s.length < 4) return false;
+        if (!s || s.length < 2) return false;
+        // 中文字符过多，不太可能是公式
         if ((s.match(/[\u4e00-\u9fff]/g) || []).length > 2) return false;
+        
+        // 包含希腊字母或数学符号，很可能是公式
+        if (/[Α-Ωα-ωπτφϕΔ∞∑∏∫]/.test(s)) return true;
+        
+        // 包含下标或上标结构
+        if (/[A-Za-z][_^][A-Za-z0-9()+\-]/.test(s)) return true;
+        
+        // 包含括号内的下标，如 φ(st)、V(st)
+        if (/[A-Za-zΑ-Ωα-ωπτφϕ]\([A-Za-z0-9_+\-,|∣]+\)/.test(s)) return true;
+        
+        // 包含运算符和变量
         const hasOp = /[=+\-−*/]/.test(s);
         const hasToken = /[A-Za-zΑ-Ωα-ωπτφϕΔ∞]/.test(s);
+        if (hasOp && hasToken) return true;
+        
+        // 包含常见数学函数
         const hasMathFn = /(sin|cos|tan|cot|csc|exp|sinc|FrFT|opt)/i.test(s);
-        return (hasOp && hasToken) || (hasMathFn && hasToken);
+        if (hasMathFn && hasToken) return true;
+        
+        return false;
       }
 
       function formatFormulaInline(raw: string): string {
         const source = String(raw || "").trim();
         if (!source) return "";
         const katexHtml = renderKatexFormula(source, false);
-        if (katexHtml) return ` <span style="font-size:1.02em;">${katexHtml}</span> `;
+        if (katexHtml) return ` <span style="font-size:1.02em; display:inline-block; max-width:100%; overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; vertical-align:middle;">${katexHtml}</span> `;
         const text = latexToReadable(source).replace(/\s+/g, " ");
         return text ? ` ${escapeHtml(text)} ` : "";
       }
 
       function enhanceFormulaSegmentAfterColon(text: string): string {
         const src = String(text || "");
-        const m = src.match(/^([^:：]{0,80}[:：]\s*)(.+)$/);
-        if (!m) return escapeHtml(src);
-        const prefixRaw = String(m[1] || "");
-        const rhs = String(m[2] || "").trim();
+        // 按首个半角/全角冒号拆分；不能使用「冒号前至多 N 字」限制，否则长句会在首个冒号很远时不匹配，
+        // 进而退回 escapeHtml，导致整段（含 $...$）无法走行内公式渲染。
+        const colonIdx = src.search(/[:：]/);
+        if (colonIdx < 0) {
+          return renderInlineMarkdownLite(src);
+        }
+        let endPrefix = colonIdx + 1;
+        while (endPrefix < src.length && /\s/.test(src[endPrefix])) {
+          endPrefix++;
+        }
+        const prefixRaw = src.slice(0, endPrefix);
+        const rhs = src.slice(endPrefix).trim();
         let prefix = renderInlineMarkdownLite(prefixRaw);
         // 仅在“左侧是简短公式标签”时增强渲染，避免把普通文本误判为公式。
-        const colonIdx = Math.max(prefixRaw.lastIndexOf(":"), prefixRaw.lastIndexOf("："));
-        if (colonIdx > 0) {
-          const leftLabel = prefixRaw.slice(0, colonIdx).trim();
-          const sep = prefixRaw.slice(colonIdx);
+        const prefixColonIdx = Math.max(prefixRaw.lastIndexOf(":"), prefixRaw.lastIndexOf("："));
+        if (prefixColonIdx > 0) {
+          const leftLabel = prefixRaw.slice(0, prefixColonIdx).trim();
+          const sep = prefixRaw.slice(prefixColonIdx);
           const cjkCount = (leftLabel.match(/[\u4e00-\u9fff]/g) || []).length;
           const shouldFormatLeftFormula =
             cjkCount <= 1 &&
@@ -1519,22 +1679,6 @@ export function registerLLMItemPaneSection() {
           return `${prefix}${renderInlineMarkdownLite(rhs)}`;
         }
         return `${prefix}${formatFormulaInline(rhs)}`;
-      }
-
-      function formatFormulaReadable(raw: string): string {
-        const source = String(raw || "").trim();
-        if (!source) return "";
-        const katexHtml = renderKatexFormula(source, false);
-        if (katexHtml) {
-          return ` <span style="font-size:1.02em;">${katexHtml}</span> `;
-        }
-        const text = latexToReadable(source).replace(/\s+/g, " ");
-        if (!text) return "";
-        const escaped = escapeHtml(text);
-        if (text.length >= 46) {
-          return `<div style="margin:6px 0; padding:4px 8px; border-left:2px solid rgba(127,127,127,0.35);">${escaped}</div>`;
-        }
-        return ` ${escaped} `;
       }
 
       function escapeFormulaWithSoftBreaks(raw: string): string {
@@ -1592,16 +1736,36 @@ export function registerLLMItemPaneSection() {
         const katexInput = applyFormulaSoftBreakHints(source);
         const katexHtml = renderKatexFormula(katexInput, true);
         if (katexHtml) {
-          return `<div style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.10); border-left:2px solid rgba(127,127,127,0.35); overflow-x:hidden; text-align:center;">${katexHtml}</div>`;
+          return `<div style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.10); border-left:2px solid rgba(127,127,127,0.35); overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; text-align:center;">${katexHtml}</div>`;
         }
         const text = latexToReadable(source);
         if (!text) return "";
         const escaped = escapeFormulaWithSoftBreaks(text).replace(/\n/g, "<br>");
-        return `<div style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.10); border-left:2px solid rgba(127,127,127,0.35); overflow-x:hidden; white-space:normal; word-break:normal; overflow-wrap:normal; text-align:center; font-family:'Consolas','Menlo','Monaco','Courier New',monospace; font-size:13px; line-height:1.65;">${escaped}</div>`;
+        return `<div style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.10); border-left:2px solid rgba(127,127,127,0.35); overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; white-space:normal; word-break:normal; overflow-wrap:normal; text-align:center; font-family:'Consolas','Menlo','Monaco','Courier New',monospace; font-size:13px; line-height:1.65;">${escaped}</div>`;
       }
 
       function renderInlineMarkdownLite(raw: string): string {
-        const src = String(raw || "");
+        let src = String(raw || "");
+        
+        // 预处理：统一各种 $ 符号变体为标准 ASCII $
+        src = src.replace(/＄/g, "$"); // 全角美元符号 U+FF04
+        src = src.replace(/\$\$/g, "$$"); // 确保 $$ 不被误处理
+        
+        // 预处理：如果 $ 被 HTML 转义了，还原回来
+        src = src.replace(/&dollar;/gi, "$");
+        src = src.replace(/&#36;/g, "$");
+        src = src.replace(/&#x24;/gi, "$");
+        
+        // 预处理：将 LaTeX 风格的 \[...\] 转换为 $$...$$ 
+        src = src.replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula) => {
+          return `$$${formula}$$`;
+        });
+        
+        // 预处理：将 LaTeX 风格的 \(...\) 转换为 $...$
+        src = src.replace(/\\\(([\s\S]*?)\\\)/g, (_match, formula) => {
+          return `$${formula}$`;
+        });
+        
         // 处理显式 $...$ / $$...$$ 公式，使用线性扫描避免复杂正则导致栈溢出。
         let text = "";
         let i = 0;
@@ -1618,9 +1782,13 @@ export function registerLLMItemPaneSection() {
           if (isDouble) {
             const q = src.indexOf("$$", p + 2);
             if (q > p + 2) {
-              text += formatFormulaReadable(src.slice(p + 2, q));
-              i = q + 2;
-              continue;
+              const formula = src.slice(p + 2, q);
+              // 如果公式内容 trim 后不为空，则渲染；否则保留原始 $$
+              if (formula.trim()) {
+                text += formatFormulaInline(formula);
+                i = q + 2;
+                continue;
+              }
             }
             text += "$$";
             i = p + 2;
@@ -1628,9 +1796,13 @@ export function registerLLMItemPaneSection() {
           }
           const q = src.indexOf("$", p + 1);
           if (q > p + 1) {
-            text += formatFormulaReadable(src.slice(p + 1, q));
-            i = q + 1;
-            continue;
+            const formula = src.slice(p + 1, q);
+            // 如果公式内容 trim 后不为空，则渲染；否则保留原始 $
+            if (formula.trim()) {
+              text += formatFormulaInline(formula);
+              i = q + 1;
+              continue;
+            }
           }
           text += "$";
           i = p + 1;
@@ -1644,14 +1816,40 @@ export function registerLLMItemPaneSection() {
           "$1<sub>$2</sub>",
         );
         text = text.replace(/`([^`]+)`/g, "<code>$1</code>");
-        // 不展示 Markdown 加粗标记，避免出现“**目标信号位置**”这类视觉噪音。
-        text = text.replace(/\*\*([^*]+)\*\*/g, "$1");
+        // 行内加粗：禁止跨行、限制长度，避免模型少写一对 ** 时把整篇直到下一个 ** 都吞进一次匹配。
+        text = text.replace(
+          /\*\*([^*\r\n]{1,240})\*\*/g,
+          '<strong style="font-weight:700;">$1</strong>',
+        );
         return text;
       }
 
       function renderMarkdownLite(raw: string): string {
-        const src = String(raw || "").replace(/\r\n/g, "\n").trim();
+        let src = String(raw || "").replace(/\r\n/g, "\n").trim();
         if (!src) return "";
+        // 常见笔误：折扣因子 y → γ（避免与拉丁字母 y 混淆）
+        src = src.replace(/折扣因子y(?=[（，、：])/g, "折扣因子γ");
+        src = src.replace(/因子y(?=[（，、：])/g, "因子γ");
+
+        // 预处理：统一各种 $ 符号变体为标准 ASCII $
+        src = src.replace(/＄/g, "$"); // 全角美元符号 U+FF04
+        src = src.replace(/\$\$/g, "$$"); // 确保 $$ 不被误处理
+        
+        // 预处理：如果 $ 被 HTML 转义了，还原回来
+        src = src.replace(/&dollar;/gi, "$");
+        src = src.replace(/&#36;/g, "$");
+        src = src.replace(/&#x24;/gi, "$");
+        
+        // 预处理：将 LaTeX 风格的 \[...\] 转换为 $$...$$ 块级公式
+        src = src.replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula) => {
+          return `$$${formula}$$`;
+        });
+        
+        // 预处理：将 LaTeX 风格的 \(...\) 转换为 $...$ 行内公式
+        src = src.replace(/\\\(([\s\S]*?)\\\)/g, (_match, formula) => {
+          return `$${formula}$`;
+        });
+        
         const lines = src.split("\n");
         const out: string[] = [];
         let inCode = false;
@@ -1661,10 +1859,19 @@ export function registerLLMItemPaneSection() {
           if (/^\s*```/.test(line)) {
             if (!inCode) {
               inCode = true;
-              out.push('<pre style="margin:8px 0; padding:8px 10px; border-radius:8px; background:rgba(127,127,127,0.12); overflow:auto;"><code>');
+              // 外层限定为气泡/侧栏宽度并负责横向滚动；内层 pre 随内容变宽，避免“滚动条轨道跟整篇代码一样宽”
+              out.push(
+                '<div class="ff-md-code-scroll" style="width:100%;max-width:100%;min-width:0;box-sizing:border-box;' +
+                  "margin:8px 0;border-radius:8px;background:rgba(127,127,127,0.12);" +
+                  'overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;">' +
+                  '<pre style="margin:0;padding:8px 10px;border-radius:8px;background:transparent;box-sizing:border-box;' +
+                  'display:block;width:max-content;min-width:100%;">' +
+                  '<code style="display:block;white-space:pre;font-family:Consolas,Menlo,Monaco,\'Courier New\',monospace;' +
+                  'font-size:0.88em;line-height:1.55;">',
+              );
             } else {
               inCode = false;
-              out.push("</code></pre>");
+              out.push("</code></pre></div>");
             }
             continue;
           }
@@ -1699,34 +1906,92 @@ export function registerLLMItemPaneSection() {
           const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
           if (heading) {
             const level = Math.min(6, heading[1].length);
-            const size = level <= 2 ? "17px" : level <= 4 ? "15px" : "14px";
+            const size = level <= 2 ? "18px" : level <= 4 ? "16px" : "15px";
+            const weight = level <= 2 ? "700" : "600";
             out.push(
-              `<div style="margin:10px 0 6px; font-weight:700; font-size:${size};">${renderInlineMarkdownLite(
+              `<div style="margin:12px 0 8px; font-weight:${weight}; font-size:${size}; line-height:1.4;">${renderInlineMarkdownLite(
                 heading[2],
               )}</div>`,
             );
             continue;
           }
-          const list = line.match(/^\s*[-*•]\s+(.*)$/);
+          // 「1. xxx」：行首仅少量空白时当作小节标题；缩进较多的「  1.」为有序列表，避免误用大号标题 + 过宽缩进。
+          const numberedLine = line.match(/^(\s*)(\d{1,2})\.\s+(.*)$/);
+          if (numberedLine) {
+            const indentWs = String(numberedLine[1] || "");
+            const indentUnits = indentWs.replace(/\t/g, "  ").length;
+            const num = String(numberedLine[2] || "");
+            const body = String(numberedLine[3] || "");
+            const FIRST_NEST_PAD_PX = 14;
+            const NEST_STEP_PX = 10;
+            const MAX_NEST = 5;
+            if (indentUnits <= 1) {
+              out.push(
+                `<div style="margin:16px 0 10px; font-weight:700; font-size:16px; line-height:1.5; letter-spacing:0.01em; color:inherit;">${renderInlineMarkdownLite(
+                  body,
+                )}</div>`,
+              );
+            } else {
+              const nest = Math.min(MAX_NEST, Math.max(0, Math.floor(indentUnits / 2)));
+              const padLeft = nest <= 0 ? 0 : FIRST_NEST_PAD_PX + (nest - 1) * NEST_STEP_PX;
+              const listRowWrapStyle =
+                `display:flex;align-items:flex-start;gap:6px;margin:3px 0;padding-left:${padLeft}px;` +
+                `font-weight:400;line-height:1.65;box-sizing:border-box;width:100%;min-width:0;`;
+              const numCellStyle =
+                `flex:0 0 auto;min-width:1.6em;text-align:right;line-height:inherit;user-select:none;opacity:0.88;font-variant-numeric:tabular-nums;`;
+              const bodyHtml = /[:：]/.test(body)
+                ? enhanceFormulaSegmentAfterColon(body)
+                : renderInlineMarkdownLite(body);
+              out.push(
+                `<div style="${listRowWrapStyle}">` +
+                  `<span style="${numCellStyle}">${escapeHtml(num)}.</span>` +
+                  `<div style="flex:1;min-width:0;">${bodyHtml}</div>` +
+                  `</div>`,
+              );
+            }
+            continue;
+          }
+          const list = line.match(/^(\s*)([-*•])\s+(.*)$/);
           if (list) {
-            const item = String(list[1] || "");
+            const indentWs = String(list[1] || "");
+            const indentUnits = indentWs.replace(/\t/g, "  ").length;
+            const nest = Math.min(5, Math.floor(indentUnits / 2));
+            // 顶级顶格；子级再缩进。符号奇偶交替：避免连续两级都用「圆圈」类圆点。
+            const FIRST_NEST_PAD_PX = 14;
+            const NEST_STEP_PX = 10;
+            const padLeft = nest <= 0 ? 0 : FIRST_NEST_PAD_PX + (nest - 1) * NEST_STEP_PX;
+            const item = String(list[3] || "");
+            const bulletMark = nest % 2 === 0 ? "•" : "\u2013";
+            const bulletCellWidth = nest % 2 === 0 ? "1.05em" : "1.1em";
+            const listRowWrapStyle =
+              `display:flex;align-items:flex-start;gap:6px;margin:3px 0;padding-left:${padLeft}px;` +
+              `font-weight:400;line-height:1.65;box-sizing:border-box;width:100%;min-width:0;`;
+            const bulletCellStyle =
+              `flex:0 0 ${bulletCellWidth};width:${bulletCellWidth};text-align:center;line-height:inherit;user-select:none;`;
+            let bodyHtml: string;
             if (/[:：]/.test(item)) {
-              out.push(`<div style="margin:2px 0 2px 0;">• ${enhanceFormulaSegmentAfterColon(item)}</div>`);
+              bodyHtml = enhanceFormulaSegmentAfterColon(item);
             } else if (/\$/.test(item)) {
               // 显式 $...$ / $$...$$ 在列表项里优先按 markdown 公式解析，
               // 避免被裸公式分支误判后直接送入 KaTeX 导致失败。
-              out.push(`<div style="margin:2px 0 2px 0;">• ${renderInlineMarkdownLite(item)}</div>`);
+              bodyHtml = renderInlineMarkdownLite(item);
             } else if (looksLikeBareFormula(item)) {
-              out.push(`<div style="margin:2px 0 2px 0;">• ${formatFormulaInline(item)}</div>`);
+              bodyHtml = formatFormulaInline(item);
             } else {
-              out.push(`<div style="margin:2px 0 2px 0;">• ${renderInlineMarkdownLite(item)}</div>`);
+              bodyHtml = renderInlineMarkdownLite(item);
             }
+            out.push(
+              `<div style="${listRowWrapStyle}">` +
+                `<span style="${bulletCellStyle}">${bulletMark}</span>` +
+                `<div style="flex:1;min-width:0;">${bodyHtml}</div>` +
+                `</div>`,
+            );
             continue;
           }
           const quote = line.match(/^\s*>\s?(.*)$/);
           if (quote) {
             out.push(
-              `<div style="margin:4px 0; padding-left:8px; border-left:2px solid rgba(127,127,127,0.35); opacity:0.9;">${renderInlineMarkdownLite(
+              `<div style="margin:4px 0; padding-left:8px; border-left:2px solid rgba(127,127,127,0.35); opacity:0.9; font-weight:400;">${renderInlineMarkdownLite(
                 quote[1],
               )}</div>`,
             );
@@ -1736,13 +2001,15 @@ export function registerLLMItemPaneSection() {
             out.push("<div style=\"height:6px;\"></div>");
             continue;
           }
-          out.push(`<div>${renderInlineMarkdownLite(line)}</div>`);
+          out.push(
+            `<div style="font-weight:400; line-height:1.65; margin:2px 0;">${renderInlineMarkdownLite(line)}</div>`,
+          );
         }
         if (inMathBlock && mathLines.length) {
           out.push(formatFormulaBlock(mathLines.join("\n")));
         }
         if (inCode) {
-          out.push("</code></pre>");
+          out.push("</code></pre></div>");
         }
         return out.join("");
       }
@@ -1756,9 +2023,9 @@ export function registerLLMItemPaneSection() {
           style.id = typingStyleId;
           style.textContent = `
 @keyframes ffTypingDot {
-  0%, 100% { transform: translateY(0) scale(0.9); opacity: 0.35; }
-  30% { transform: translateY(-6px) scale(1.02); opacity: 1; }
-  60% { transform: translateY(-2px) scale(0.96); opacity: 0.75; }
+  0%, 100% { transform: translateY(0) scale(0.45); opacity: 0.35; }
+  40% { transform: translateY(-5px) scale(1.22); opacity: 1; }
+  70% { transform: translateY(-1px) scale(0.78); opacity: 0.65; }
 }
 `;
           ownerDoc.head?.appendChild(style);
@@ -1769,6 +2036,9 @@ export function registerLLMItemPaneSection() {
         wrap.style.alignItems = "flex-start";
         wrap.style.gap = "6px";
         wrap.style.maxWidth = "96%";
+        wrap.style.minWidth = "0";
+        wrap.style.width = "100%";
+        wrap.style.boxSizing = "border-box";
 
         const modelLabel = ownerDoc.createElement("div");
         modelLabel.style.fontSize = "12px";
@@ -1837,6 +2107,11 @@ export function registerLLMItemPaneSection() {
         const answerBubbleBg = "rgba(127, 127, 127, 0.10)";
         answerBubble.style.padding = "10px 12px";
         answerBubble.style.borderRadius = "10px";
+        answerBubble.style.minWidth = "0";
+        answerBubble.style.maxWidth = "100%";
+        answerBubble.style.width = "100%";
+        answerBubble.style.alignSelf = "stretch";
+        answerBubble.style.boxSizing = "border-box";
         answerBubble.style.whiteSpace = "pre-wrap";
         answerBubble.style.wordBreak = "break-word";
         (answerBubble.style as any).overflowWrap = "anywhere";
@@ -1855,7 +2130,7 @@ export function registerLLMItemPaneSection() {
         typingDots.style.display = "inline-flex";
         typingDots.style.alignItems = "center";
         typingDots.style.gap = "6px";
-        typingDots.style.height = "18px";
+        typingDots.style.height = "22px";
         typingDots.style.padding = "2px 0";
         typingDots.style.opacity = "0.9";
         for (let i = 0; i < 3; i++) {
@@ -1865,7 +2140,10 @@ export function registerLLMItemPaneSection() {
           dot.style.borderRadius = "999px";
           dot.style.background = "currentColor";
           dot.style.display = "inline-block";
-          dot.style.animation = `ffTypingDot 0.8s ${i * 0.12}s infinite cubic-bezier(0.35, 0, 0.25, 1)`;
+          dot.style.transformOrigin = "50% 50%";
+          (dot.style as any).MozTransformOrigin = "50% 50%";
+          dot.style.willChange = "transform, opacity";
+          dot.style.animation = `ffTypingDot 0.95s ${i * 0.16}s infinite cubic-bezier(0.45, 0.05, 0.55, 0.95)`;
           typingDots.appendChild(dot);
         }
         answerBubble.appendChild(typingDots);
@@ -1937,8 +2215,22 @@ export function registerLLMItemPaneSection() {
         return normalized.trim();
       }
 
+      /** 去掉终端 Rich 等产生的 ANSI/CSI 序列，避免在 Zotero 面板里显示为乱码或污染 Markdown。 */
+      function stripTerminalAnsi(raw: string): string {
+        let s = String(raw || "");
+        // CSI：ESC [ … 末字节 @–~（含 truecolor 等）
+        s = s.replace(/\u001b\[[0-?]*[-/]*[@-~]/g, "");
+        // OSC：ESC ] … BEL 或 ST
+        s = s.replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "");
+        // 其它单字节 ESC 序列
+        s = s.replace(/\u001b[@-Z\\-_]/g, "");
+        // 丢失 ESC 时常见 “?” + CSI 残留
+        s = s.replace(/\?\[[0-?]*[-/]*[@-~]/g, "");
+        return s;
+      }
+
       function sanitizeAssistantText(text: string): string {
-        let sanitized = normalizeDisplayText(text);
+        let sanitized = stripTerminalAnsi(normalizeDisplayText(text));
         // 去除模型偶发输出的“技术解释行”，避免把 RAG 实现细节暴露给用户。
         const noisyLinePatterns = [
           /.*从\s*RAG\s*上下文可见.*$/gim,

@@ -67,6 +67,13 @@ def test_onboard_fresh_install(mock_paths):
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
+    cli_json = config_file.parent / "cli.json"
+    assert cli_json.is_file()
+    cli_data = json.loads(cli_json.read_text(encoding="utf-8"))
+    assert cli_data.get("show_llm_input") is True
+    lip = cli_data.get("llm_input_print") or {}
+    assert all(lip.get(k) is True for k in ("system", "user", "rag", "skills", "tools"))
+
     expected_workspace = Config().workspace_path
     assert mock_ws.call_args.args == (expected_workspace,)
 

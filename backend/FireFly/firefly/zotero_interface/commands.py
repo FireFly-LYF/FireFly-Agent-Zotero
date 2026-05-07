@@ -286,7 +286,13 @@ def onboard(
     wizard: bool = typer.Option(False, "--wizard", help="Use interactive wizard"),
 ):
     """初始化 firefly 配置与 workspace。"""
-    from firefly.config.loader import get_config_path, load_config, save_config, set_config_path
+    from firefly.config.loader import (
+        get_config_path,
+        load_config,
+        save_config,
+        set_config_path,
+        write_project_context,
+    )
     from firefly.config.schema import Config
 
     if config:
@@ -356,6 +362,20 @@ def onboard(
         console.print(f"[green]✓[/green] Created workspace at {workspace_path}")
 
     sync_workspace_templates(workspace_path)
+    try:
+        write_project_context(
+            config_path=config_path,
+            workspace=workspace_path,
+        )
+    except Exception:
+        pass
+
+    try:
+        from firefly.config.cli_prefs import ensure_cli_prefs_file
+
+        ensure_cli_prefs_file(config_path)
+    except Exception:
+        pass
 
     agent_cmd = 'firefly agent -m "Hello!"'
     gateway_cmd = "firefly gateway"
@@ -914,6 +934,42 @@ def agent(
     else:
         logger.disable("firefly")
 
+    # 在 assistant 输出前展示本轮实际发给 LLM 的 messages/tools/参数（含多轮工具循环的每次请求）
+    _llm_input_use_interactive: list[bool] = [True]
+
+    async def _on_llm_request_display(payload: dict[str, Any]) -> None:
+        """展示发给 LLM 的快照；任意异常不得阻断推理。"""
+        title = "LLM 请求快照（默认整段脱敏；可在 cli.json 的 llm_input_print 中分段打印）"
+        try:
+            body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        except Exception as exc:
+            logger.warning("LLM request display: JSON encode failed ({}), using repr fallback", exc)
+            body = repr(payload)[:120_000]
+
+        def _print_plain() -> None:
+            console.print(f"\n[bold yellow]{title}[/bold yellow]")
+            console.print(body, style="dim", markup=False)
+            console.print()
+
+        if not _llm_input_use_interactive[0]:
+            _print_plain()
+            return
+        try:
+            def _write() -> None:
+                ansi = _render_interactive_ansi(
+                    lambda c: (
+                        c.print(),
+                        c.print(f"  [bold yellow]{title}[/bold yellow]"),
+                        c.print(body, style="dim", markup=False),
+                        c.print(),
+                    )
+                )
+                print_formatted_text(ANSI(ansi), end="")
+            await run_in_terminal(_write)
+        except Exception as exc:
+            logger.warning("LLM request display: run_in_terminal failed ({}), using direct print", exc)
+            _print_plain()
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -934,6 +990,7 @@ def agent(
         unified_session=config.agents.defaults.unified_session,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        on_llm_request=_on_llm_request_display,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
@@ -972,11 +1029,13 @@ def agent(
                 )
             await agent_loop.close_mcp()
 
+        _llm_input_use_interactive[0] = _has_interactive_console()
         asyncio.run(run_once())
     else:
         # 交互模式：像其他 channel 一样通过 bus 路由
         from firefly.bus.events import InboundMessage
         interactive_console = _has_interactive_console()
+        _llm_input_use_interactive[0] = interactive_console
         if interactive_console:
             _init_prompt_session()
             console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
@@ -1383,10 +1442,73 @@ def agent(
                             return p
                     return None
 
+                def _path_has_raw_pdf_segment(p: Path) -> bool:
+                    """True if path contains .../raw/pdf/... (case-insensitive, any separator)."""
+                    parts = [x.lower() for x in p.parts]
+                    for i in range(len(parts) - 1):
+                        if parts[i] == "raw" and parts[i + 1] == "pdf":
+                            return True
+                    return False
+
                 def _resolve_markdown_path(pdf_path: Path) -> Path:
-                    text = str(pdf_path)
-                    marker = "raw\\pdf\\"
-                    marker_alt = "raw/pdf/"
+                    """Map .../raw/pdf/<rel>.pdf -> .../raw/markdown/<rel>.md (mirrors pdf_to_markdown layout)."""
+                    p = pdf_path.expanduser()
+                    try:
+                        p = p.resolve()
+                    except Exception:
+                        pass
+                    parts = list(p.parts)
+                    low = [x.lower() for x in parts]
+                    for i in range(len(low) - 1):
+                        if low[i] == "raw" and low[i + 1] == "pdf":
+                            root = Path(parts[0]).joinpath(*parts[1:i]) if i > 0 else Path(parts[0])
+                            tail_parts = parts[i + 2 :]
+                            if not tail_parts:
+                                return root / "raw" / "markdown" / "document.md"
+                            rel = Path(*tail_parts)
+                            return (root / "raw" / "markdown" / rel).with_suffix(".md")
+                    return p.with_suffix(".md")
+
+                def _pick_source_pdf_for_conversion(body: dict[str, Any]) -> Path | None:
+                    """Prefer wiki mirror on disk; else Zotero attachment path; else pdf_dir/pdf_name."""
+                    for key in ("wiki_pdf_path", "pdf_path"):
+                        raw = str((body or {}).get(key, "")).strip()
+                        if not raw:
+                            continue
+                        cand = Path(raw).expanduser()
+                        try:
+                            cand = cand.resolve()
+                        except Exception:
+                            pass
+                        if cand.is_file():
+                            return cand
+                    pdf_dir = str((body or {}).get("pdf_dir", "")).strip()
+                    pdf_name = str((body or {}).get("pdf_name", "")).strip()
+                    if pdf_dir and pdf_name:
+                        cand = (Path(pdf_dir).expanduser() / pdf_name)
+                        try:
+                            cand = cand.resolve()
+                        except Exception:
+                            pass
+                        if cand.is_file():
+                            return cand
+                    return None
+
+                def _markdown_output_path(body: dict[str, Any], source_pdf: Path) -> Path:
+                    """When plugin sends llm-wiki raw/pdf layout, always write under raw/markdown."""
+                    pdf_dir = str((body or {}).get("pdf_dir", "")).strip()
+                    pdf_name = str((body or {}).get("pdf_name", "")).strip()
+                    if pdf_dir and pdf_name:
+                        sync_intent = Path(pdf_dir).expanduser() / pdf_name
+                        if _path_has_raw_pdf_segment(sync_intent):
+                            return _resolve_markdown_path(sync_intent)
+                    return _resolve_markdown_path(source_pdf)
+
+                def _resolve_rag_jsonl_from_markdown(markdown_path: Path) -> Path:
+                    """与 llm-wiki 目录约定一致：raw/markdown 下 .md 对应 raw/rag 下同相对路径 .jsonl。"""
+                    text = str(markdown_path)
+                    marker = "raw\\markdown\\"
+                    marker_alt = "raw/markdown/"
                     lowered = text.lower()
                     idx = lowered.find(marker)
                     if idx < 0:
@@ -1394,9 +1516,53 @@ def agent(
                     if idx >= 0:
                         head = text[:idx]
                         tail = text[idx + len(marker) :] if lowered.find(marker) >= 0 else text[idx + len(marker_alt) :]
-                        markdown_root = Path(f"{head}raw/markdown")
-                        return (markdown_root / tail).with_suffix(".md")
-                    return pdf_path.with_suffix(".md")
+                        rag_root = Path(f"{head}raw/rag")
+                        return (rag_root / tail).with_suffix(".jsonl")
+                    return markdown_path.with_suffix(".jsonl")
+
+                async def _ensure_markdown_rag_index(markdown_path: Path) -> dict[str, Any]:
+                    md = markdown_path.expanduser().resolve()
+                    if not md.is_file():
+                        raise FileNotFoundError(f"markdown not found for rag: {md}")
+                    rag_path = _resolve_rag_jsonl_from_markdown(md)
+                    script_path = (
+                        Path(__file__).resolve().parents[1]
+                        / "skills"
+                        / "markdown"
+                        / "scripts"
+                        / "markdown_to_rag.py"
+                    )
+                    if not script_path.is_file():
+                        raise FileNotFoundError(f"markdown_to_rag script not found: {script_path}")
+                    proc = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        str(script_path),
+                        "--markdown",
+                        str(md),
+                        "--rag",
+                        str(rag_path.expanduser().resolve()),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout_b, stderr_b = await proc.communicate()
+                    stdout = stdout_b.decode("utf-8", errors="replace")
+                    stderr = stderr_b.decode("utf-8", errors="replace")
+                    if proc.returncode != 0:
+                        raise RuntimeError(
+                            f"rag index failed (code={proc.returncode}): {stderr or stdout}".strip()
+                        )
+                    chunk_count = 0
+                    try:
+                        payload = json.loads(stdout.strip() or "{}")
+                        inner = payload.get("result")
+                        if isinstance(inner, dict):
+                            chunk_count = int(inner.get("chunk_count") or 0)
+                    except Exception:
+                        chunk_count = 0
+                    return {
+                        "rag_path": str(rag_path),
+                        "rag_chunk_count": chunk_count,
+                    }
 
                 async def _ensure_pdf_converted(pdf_path: Path, markdown_path: Path) -> dict[str, Any]:
                     if markdown_path.is_file():
@@ -1452,14 +1618,20 @@ def agent(
                     except Exception:
                         return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
 
-                    raw_pdf_path = str((body or {}).get("wiki_pdf_path", "")).strip() or str(
-                        (body or {}).get("pdf_path", "")
-                    ).strip()
-                    if not raw_pdf_path:
-                        return web.json_response({"ok": False, "error": "pdf_path is required"}, status=400)
+                    pdf_path = _pick_source_pdf_for_conversion(body or {})
+                    if pdf_path is None:
+                        return web.json_response(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "PDF file not found. Sync or open the attachment so wiki_pdf_path / "
+                                    "pdf_path exists, or ensure pdf_dir+pdf_name points to a real file."
+                                ),
+                            },
+                            status=400,
+                        )
 
-                    pdf_path = Path(raw_pdf_path).expanduser().resolve()
-                    markdown_path = _resolve_markdown_path(pdf_path)
+                    markdown_path = _markdown_output_path(body or {}, pdf_path)
                     try:
                         result = await _ensure_pdf_converted(pdf_path, markdown_path)
                     except Exception as exc:
@@ -1473,12 +1645,27 @@ def agent(
                             status=500,
                         )
 
+                    try:
+                        rag_meta = await _ensure_markdown_rag_index(markdown_path)
+                    except Exception as exc:
+                        return web.json_response(
+                            {
+                                "ok": False,
+                                "error": str(exc),
+                                "pdf_path": str(pdf_path),
+                                "markdown_path": str(markdown_path),
+                                "markdown_conversion": result,
+                            },
+                            status=500,
+                        )
+
                     return web.json_response(
                         {
                             "ok": True,
                             "pdf_path": str(pdf_path),
                             "markdown_path": str(markdown_path),
                             **result,
+                            **rag_meta,
                         }
                     )
 
@@ -1602,6 +1789,42 @@ def agent(
                     ))
                     return web.json_response({"ok": True, "detail": "stop requested"})
 
+                def _resolve_zotero_chat_session_key(requested_sid: str) -> str:
+                    """与 /zotero/history 一致：chat-N 可能映射到 item 下的 legacy session key。"""
+                    resolved = requested_sid
+                    if requested_sid.startswith("zotero:chat-"):
+                        suffix = requested_sid.split("zotero:chat-", 1)[-1]
+                        probe = _serialize_session_messages(requested_sid)
+                        if not probe and suffix.isdigit():
+                            legacy_listing = agent_loop.sessions.list_sessions()
+                            legacy_candidates = [
+                                row
+                                for row in legacy_listing
+                                if str(row.get("key", "")).startswith("zotero:item-")
+                                and str(row.get("key", "")).endswith(f"-chat-{suffix}")
+                            ]
+                            if legacy_candidates:
+                                legacy_candidates.sort(
+                                    key=lambda row: str(row.get("updated_at", "")),
+                                    reverse=True,
+                                )
+                                resolved = str(legacy_candidates[0].get("key") or requested_sid)
+                    return resolved
+
+                async def _clear_session(request: web.Request) -> web.Response:
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        body = {}
+                    raw_sid = str((body or {}).get("session_id", "")).strip()
+                    if not raw_sid:
+                        return web.json_response({"ok": False, "error": "session_id is required"}, status=400)
+                    target_key = _resolve_zotero_chat_session_key(raw_sid)
+                    sess = agent_loop.sessions.get_or_create(target_key)
+                    sess.clear()
+                    agent_loop.sessions.save(sess)
+                    return web.json_response({"ok": True, "session_id": target_key})
+
                 app = web.Application()
                 app.router.add_get("/health", _health)
                 app.router.add_get("/zotero/meta", _meta)
@@ -1609,6 +1832,7 @@ def agent(
                 app.router.add_post("/zotero/message", _ingest)
                 app.router.add_post("/zotero/stream", _stream_chat)
                 app.router.add_post("/zotero/cancel", _cancel_chat)
+                app.router.add_post("/zotero/session/clear", _clear_session)
                 app.router.add_post("/zotero/pdf-opened", _pdf_opened)
                 app.router.add_post("/zotero/convert-markdown", _convert_markdown)
                 runner = web.AppRunner(app)
@@ -1650,18 +1874,20 @@ def agent(
                         if msg.metadata.get("_streamed"):
                             if msg.content:
                                 await _stream_publish(msg.chat_id, {"type": "final", "content": msg.content})
-                                if interactive_console:
-                                    await _print_interactive_response(
-                                        msg.content,
-                                        render_markdown=markdown,
-                                        metadata=msg.metadata,
-                                    )
-                                else:
-                                    _print_agent_response(
-                                        msg.content,
-                                        render_markdown=markdown,
-                                        metadata=msg.metadata,
-                                    )
+                                # 流式已在 StreamRenderer 中打到终端；仍向 Zotero 推送 final，但勿重复打印
+                                if not (renderer and renderer.streamed):
+                                    if interactive_console:
+                                        await _print_interactive_response(
+                                            msg.content,
+                                            render_markdown=markdown,
+                                            metadata=msg.metadata,
+                                        )
+                                    else:
+                                        _print_agent_response(
+                                            msg.content,
+                                            render_markdown=markdown,
+                                            metadata=msg.metadata,
+                                        )
                             turn_done.set()
                             continue
 

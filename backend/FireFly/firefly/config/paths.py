@@ -48,8 +48,15 @@ def is_default_workspace(workspace: str | Path | None) -> bool:
 
 
 def get_cli_history_path() -> Path:
-    """Return the shared CLI history file path."""
-    return resolve_default_base_dir() / "history" / "cli_history"
+    """Return the CLI history file path (under the same directory as ``config.json``)."""
+    return get_config_path().parent / "history" / "cli_history"
+
+
+def get_cli_prefs_path() -> Path:
+    """Return ``cli.json`` path (same directory as ``config.json``)."""
+    from firefly.config.cli_prefs import cli_prefs_path_for
+
+    return cli_prefs_path_for(get_config_path())
 
 
 def get_bridge_install_dir() -> Path:

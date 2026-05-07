@@ -1,0 +1,10 @@
+{
+    "show_llm_input": true,
+    "llm_input_print": {
+      "system": true,
+      "user": true,
+      "rag": true,
+      "skills": false,
+      "tools": false
+    }
+  }

@@ -32,18 +32,35 @@ def test_media_dir_supports_channel_namespace(monkeypatch, tmp_path: Path) -> No
     assert get_media_dir("telegram") == config_file.parent / "media" / "telegram"
 
 
-def test_shared_and_legacy_paths_remain_global() -> None:
-    assert get_cli_history_path() == Path.home() / ".firefly" / "history" / "cli_history"
-    assert get_bridge_install_dir() == Path.home() / ".firefly" / "bridge"
-    assert get_legacy_sessions_dir() == Path.home() / ".firefly" / "sessions"
+def test_cli_history_follows_config_parent(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "proj" / "config" / "config.json"
+    monkeypatch.setattr("firefly.config.paths.get_config_path", lambda: config_file)
+
+    assert get_cli_history_path() == tmp_path / "proj" / "config" / "history" / "cli_history"
 
 
-def test_workspace_path_is_explicitly_resolved() -> None:
-    assert get_workspace_path() == Path.home() / ".firefly" / "workspace"
+def test_bridge_and_legacy_sessions_use_project_base(monkeypatch, tmp_path: Path) -> None:
+    base = tmp_path / "proj"
+    monkeypatch.setattr("firefly.config.paths.resolve_default_base_dir", lambda: base)
+
+    assert get_bridge_install_dir() == base / "bridge"
+    assert get_legacy_sessions_dir() == base / "sessions"
+
+
+def test_workspace_path_is_explicitly_resolved(monkeypatch, tmp_path: Path) -> None:
+    iso = tmp_path / "iso"
+    monkeypatch.setattr("firefly.config.paths.resolve_default_base_dir", lambda: iso)
+
+    assert get_workspace_path() == iso / "workspace"
     assert get_workspace_path("~/custom-workspace") == Path.home() / "custom-workspace"
 
 
-def test_is_default_workspace_distinguishes_default_and_custom_paths() -> None:
+def test_is_default_workspace_distinguishes_default_and_custom_paths(
+    monkeypatch, tmp_path: Path
+) -> None:
+    iso = tmp_path / "iso"
+    monkeypatch.setattr("firefly.config.paths.resolve_default_base_dir", lambda: iso)
+
     assert is_default_workspace(None) is True
-    assert is_default_workspace(Path.home() / ".firefly" / "workspace") is True
+    assert is_default_workspace(iso / "workspace") is True
     assert is_default_workspace("~/custom-workspace") is False

@@ -51,8 +51,17 @@ class ToolRegistry:
         definitions = [tool.to_schema() for tool in self._tools.values()]
         builtins: list[dict[str, Any]] = []
         mcp_tools: list[dict[str, Any]] = []
+        
+        # 过滤掉浏览器相关工具
+        browser_tool_prefixes = ("browser_", "cursor-ide-browser-")
+        
         for schema in definitions:
             name = self._schema_name(schema)
+            
+            # 跳过浏览器工具
+            if any(name.startswith(prefix) for prefix in browser_tool_prefixes):
+                continue
+                
             if name.startswith("mcp_"):
                 mcp_tools.append(schema)
             else:

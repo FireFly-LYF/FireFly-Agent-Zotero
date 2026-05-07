@@ -9,15 +9,19 @@
 plugin/node_modules/
 plugin/build/
 plugin/logs/
+plugin/.scaffold/build/
 backend/FireFly/.venv/
 backend/FireFly/venv/
 backend/FireFly/.pytest_cache/
 backend/workspace/**
 !backend/workspace/.gitkeep
 !backend/workspace/**/.gitkeep
-backend/.firefly/
-backend/history/
-backend/config.json
+# 勿将嵌套 .git 当作工作区内容提交
+backend/workspace/.git/
+# Local firefly instance（backend/config/）：只忽略密钥与本机状态；cli.json 可提交
+backend/config/config.json
+backend/config/context.json
+backend/config/history/
 backend/llm-wiki/raw/pdf/**
 !backend/llm-wiki/raw/pdf/.gitkeep
 backend/llm-wiki/raw/markdown/**

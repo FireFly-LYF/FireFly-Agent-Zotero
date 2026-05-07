@@ -1,6 +1,6 @@
 """Configuration module for firefly."""
 
-from firefly.config.loader import get_config_path, load_config
+from firefly.config.loader import get_config_path, load_config, resolve_project_base_dir
 from firefly.config.paths import (
     get_bridge_install_dir,
     get_cli_history_path,
@@ -19,6 +19,7 @@ __all__ = [
     "Config",
     "load_config",
     "get_config_path",
+    "resolve_project_base_dir",
     "get_data_dir",
     "get_runtime_subdir",
     "get_media_dir",

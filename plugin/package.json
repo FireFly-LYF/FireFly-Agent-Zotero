@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "katex": "^0.16.45",
-    "zotero-plugin-toolkit": "^5.1.0-beta.13"
+    "zotero-plugin-toolkit": "5.1.0-beta.13"
   },
   "devDependencies": {
     "@types/chai": "^5.2.3",
@@ -46,7 +46,7 @@
     "prettier": "^3.7.4",
     "typescript": "^5.9.3",
     "zotero-plugin-scaffold": "^0.8.6",
-    "zotero-types": "^4.1.0-beta.4"
+    "zotero-types": "4.1.0-beta.4"
   },
   "prettier": {
     "printWidth": 80,

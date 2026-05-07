@@ -44,7 +44,7 @@ class FireFly:
 
         Args:
             config_path: Path to ``config.json``.  Defaults to
-                ``./config.json`` (current working directory).
+                ``./config/config.json`` when present, else ``./config.json``.
             workspace: Override the workspace directory from config.
         """
         from firefly.config.loader import load_config, resolve_config_env_vars
