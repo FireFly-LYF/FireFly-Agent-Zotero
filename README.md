@@ -21,5 +21,12 @@
 3、实现RAG链路，切分raw/markdown至raw/rag，使用相关性粗召回;  
 4、当前检索仅rag，尚未对LLM wiki进行维护，这是下一步的工作目标。
 
+2026.4.23  
+1、将nanobot完全重构为FireFly，修改了onboard和启动配置，  
+   现在会在当前路径生成workspace和config，启动时会读取上次onboard的路径配置;  
+2、新增意图识别以改善rag检索的逻辑，避免所有时刻都进行rag;  
+3、前端增加Katex库，支持公式显示，为适配窄侧边栏，对长公式采用自动换行策略;  
+4、下一步加入LLM wiki联合检索。
+
 2026.5.7  
 1、LLM wiki 维护层与 `raw/markdown/` 目录镜像：每篇文献对应 `wiki/` 下同路径单个 `.md`（内部分区见 `wiki/_templates/paper.md`）；跨篇放在 `wiki/_synthesis/`；已更新 `backend/llm-wiki` 下规范文档。
