@@ -157,13 +157,19 @@ export async function streamFromFireFly(
   onFinal?: (content: string) => void,
   onThinkingDelta?: (delta: string) => void,
   abortSignal?: AbortSignal,
+  literatureTitle?: string,
 ): Promise<void> {
-  const body = JSON.stringify({
+  const payload: Record<string, unknown> = {
     message,
     session_id: sessionID,
     thinking_state: thinkingState,
     media: Array.isArray(mediaPaths) ? mediaPaths : [],
-  });
+  };
+  const lit = String(literatureTitle || "").trim();
+  if (lit) {
+    payload.literature_title = lit;
+  }
+  const body = JSON.stringify(payload);
   const res = await fetchWithTimeout(
     BRIDGE_STREAM_URL,
     {
@@ -223,13 +229,19 @@ export async function streamFromFireFly(
 }
 
 export const fetchZoteroChatHistories = async (sessionID?: string): Promise<
-  Record<string, Array<{ role: string; content: string; reasoning_content?: string }>>
+  Record<
+    string,
+    Array<{ role: string; content: string; reasoning_content?: string; literature_title?: string }>
+  >
 > => {
   const query = sessionID ? `?session_id=${encodeURIComponent(sessionID)}` : "";
   const url = `${BRIDGE_HISTORY_URL}${query}`;
   const tryParse = (raw: string) => {
     const parsed = JSON.parse(raw || "{}") as {
-      sessions?: Record<string, Array<{ role: string; content: string; reasoning_content?: string }>>;
+      sessions?: Record<
+        string,
+        Array<{ role: string; content: string; reasoning_content?: string; literature_title?: string }>
+      >;
     };
     return parsed.sessions ?? {};
   };
@@ -246,7 +258,10 @@ export const fetchZoteroChatHistories = async (sessionID?: string): Promise<
       throw new Error(`Bridge history failed: ${res.status} ${text}`);
     }
     const parsed = (await res.json()) as {
-      sessions?: Record<string, Array<{ role: string; content: string; reasoning_content?: string }>>;
+      sessions?: Record<
+        string,
+        Array<{ role: string; content: string; reasoning_content?: string; literature_title?: string }>
+      >;
     };
     return parsed.sessions ?? {};
   }
@@ -412,12 +427,15 @@ export async function convertCurrentPdfToMarkdown(payload: {
   pdf_dir?: string;
   pdf_name?: string;
   wiki_pdf_path?: string;
+  /** 默认 true：即便已有 RAG，也按当前 Markdown 重新切片并覆盖 jsonl */
+  rebuild_rag?: boolean;
 }) {
   const body = JSON.stringify({
     pdf_path: String(payload.pdf_path || "").trim(),
     pdf_dir: String(payload.pdf_dir || "").trim(),
     pdf_name: String(payload.pdf_name || "").trim(),
     wiki_pdf_path: String(payload.wiki_pdf_path || "").trim(),
+    rebuild_rag: payload.rebuild_rag !== false,
   });
   try {
     const resp = await zoteroHttpRequest("POST", BRIDGE_CONVERT_MARKDOWN_URL, {

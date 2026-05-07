@@ -8,6 +8,12 @@ Default mapping:
 
 Output keeps the same relative directory structure. Each markdown file generates
 one JSONL file with chunk records.
+
+Chunking strategy:
+- Split by markdown headings (ATX / setext): each section is a logical chapter.
+- Within a section, merge blocks until --max-chars (same as before for oversized sections).
+- The references / bibliography section is always emitted as exactly one chunk
+  (even if longer than max_chars), tagged chunk_kind == "references".
 """
 
 from __future__ import annotations
@@ -28,6 +34,11 @@ PICTURE_TEXT_START_RE = re.compile(r"^\s*\*\*----- Start of picture text -----\*
 PICTURE_TEXT_END_RE = re.compile(r"^\s*\*\*----- End of picture text -----\*\*<br>\s*$")
 ATX_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
 SETEXT_HEADING_RE = re.compile(r"^\s*(=+|-+)\s*$")
+# 参考文献章节标题（匹配路径最后一段或整段）
+_REF_SECTION_HINT_RE = re.compile(
+    r"(参考文献|引用文献|参考资料|references?|bibliography|cited\s+references)(\s|$|[\.．:：])",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -36,6 +47,7 @@ class Block:
     has_image_ref: bool
     image_refs: list[str]
     heading: str | None = None
+    heading_level: int | None = None  # ATX / setext 标题层级；非标题块为 None
 
 
 def _iter_markdown_files(markdown_root: Path) -> list[Path]:
@@ -61,9 +73,18 @@ def _split_blocks(text: str) -> list[Block]:
         while j < total and lines[j].strip() != "":
             j += 1
         paragraph_lines = lines[begin:j]
-        heading = _extract_heading(paragraph_lines, lines, begin, j)
+        heading, heading_level = _paragraph_heading_meta(paragraph_lines, lines, begin, j)
         text_block = "\n".join(paragraph_lines).strip("\n")
-        return Block(text=text_block, has_image_ref=False, image_refs=[], heading=heading), j
+        return (
+            Block(
+                text=text_block,
+                has_image_ref=False,
+                image_refs=[],
+                heading=heading,
+                heading_level=heading_level,
+            ),
+            j,
+        )
 
     while i < total:
         if lines[i].strip() == "":
@@ -101,6 +122,7 @@ def _split_blocks(text: str) -> list[Block]:
                     has_image_ref=True,
                     image_refs=refs,
                     heading=None,
+                    heading_level=None,
                 )
             )
             continue
@@ -112,66 +134,130 @@ def _split_blocks(text: str) -> list[Block]:
     return blocks
 
 
-def _extract_heading(paragraph_lines: list[str], all_lines: list[str], begin: int, end: int) -> str | None:
+def _paragraph_heading_meta(
+    paragraph_lines: list[str],
+    all_lines: list[str],
+    begin: int,
+    end: int,
+) -> tuple[str | None, int | None]:
+    """识别段落首行为标题时返回 (标题文本, 层级)；否则 (None, None)。"""
     if not paragraph_lines:
-        return None
+        return None, None
     first = paragraph_lines[0]
     atx = ATX_HEADING_RE.match(first)
     if atx:
-        return atx.group(2).strip()
+        return atx.group(2).strip(), len(atx.group(1))
 
-    # setext heading occupies two lines and underline appears on next line.
+    # setext：下一行为 ===（一级）或 ---（二级）
     if end < len(all_lines):
         second = all_lines[end]
         if SETEXT_HEADING_RE.match(second):
-            return first.strip()
-    return None
+            underline = second.strip()
+            if underline.startswith("="):
+                return first.strip(), 1
+            return first.strip(), 2
+    return None, None
 
 
-def _make_chunks(blocks: list[Block], max_chars: int) -> list[dict[str, object]]:
-    blocks = _normalize_blocks(blocks, max_chars=max_chars)
+def _path_from_stack(stack: list[tuple[int, str]]) -> str:
+    return " > ".join(title for _, title in stack)
+
+
+def _group_blocks_into_sections(blocks: list[Block]) -> list[tuple[str, list[Block]]]:
+    """按 Markdown 标题层级切开：每个标题开启新章节，栈维护章节路径。"""
+    sections_out: list[tuple[str, list[Block]]] = []
+    cur: list[Block] = []
+    stack: list[tuple[int, str]] = []
+
+    for block in blocks:
+        if block.heading is not None and block.heading_level is not None:
+            if cur:
+                sections_out.append((_path_from_stack(stack), cur))
+                cur = []
+            while stack and stack[-1][0] >= block.heading_level:
+                stack.pop()
+            stack.append((block.heading_level, block.heading))
+        cur.append(block)
+
+    if cur:
+        sections_out.append((_path_from_stack(stack), cur))
+    return sections_out
+
+
+def _is_references_section(section_path: str) -> bool:
+    if not section_path or not section_path.strip():
+        return False
+    last = section_path.split(">")[-1].strip()
+    last_norm = re.sub(r"^[\d\.\s、，]+", "", last)
+    if _REF_SECTION_HINT_RE.search(last_norm):
+        return True
+    low = last_norm.lower()
+    return low in {"references", "reference", "bibliography", "参考文献"}
+
+
+def _chunk_record(
+    chunk_index: int,
+    text: str,
+    section_path: str,
+    image_refs: list[str],
+    *,
+    chunk_kind: str | None = None,
+) -> dict[str, object]:
+    rec: dict[str, object] = {
+        "chunk_index": chunk_index,
+        "text": text,
+        "char_count": len(text),
+        "has_image_ref": bool(image_refs),
+        "image_refs": image_refs,
+        "section_path": section_path,
+    }
+    if chunk_kind:
+        rec["chunk_kind"] = chunk_kind
+    return rec
+
+
+def _chunks_for_references_section(section_path: str, sec_blocks: list[Block]) -> list[dict[str, object]]:
+    """参考文献：合并为单个 chunk（不按 max_chars 再切）。"""
+    parts = [b.text for b in sec_blocks if b.text]
+    text = "\n\n".join(parts).strip()
+    if not text:
+        return []
+    image_refs: list[str] = []
+    for b in sec_blocks:
+        if b.has_image_ref:
+            image_refs.extend(b.image_refs)
+    return [_chunk_record(0, text, section_path, image_refs, chunk_kind="references")]
+
+
+def _chunks_for_body_section(
+    section_path: str,
+    sec_blocks: list[Block],
+    *,
+    max_chars: int,
+) -> list[dict[str, object]]:
+    """普通章节：块依次并入，超长时在章节内按 max_chars 断开为多 chunk。"""
     chunks: list[dict[str, object]] = []
     cur_blocks: list[Block] = []
     cur_len = 0
-    section_stack: list[str] = []
 
     def flush() -> None:
         nonlocal cur_blocks, cur_len
         if not cur_blocks:
             return
-        text = "\n\n".join(block.text for block in cur_blocks if block.text).strip()
+        text = "\n\n".join(b.text for b in cur_blocks if b.text).strip()
         if not text:
             cur_blocks = []
             cur_len = 0
             return
         image_refs: list[str] = []
-        has_image_ref = False
-        for block in cur_blocks:
-            if block.has_image_ref:
-                has_image_ref = True
-                image_refs.extend(block.image_refs)
-        chunks.append(
-            {
-                "chunk_index": len(chunks),
-                "text": text,
-                "char_count": len(text),
-                "has_image_ref": has_image_ref,
-                "image_refs": image_refs,
-                "section_path": " > ".join(section_stack) if section_stack else "",
-            }
-        )
+        for b in cur_blocks:
+            if b.has_image_ref:
+                image_refs.extend(b.image_refs)
+        chunks.append(_chunk_record(len(chunks), text, section_path, image_refs))
         cur_blocks = []
         cur_len = 0
 
-    for block in blocks:
-        if block.heading:
-            # 用最近出现的标题维护轻量级 section 路径，方便检索过滤。
-            if section_stack and section_stack[-1] == block.heading:
-                pass
-            else:
-                section_stack.append(block.heading)
-                section_stack = section_stack[-4:]
-
+    for block in sec_blocks:
         block_len = len(block.text)
         if cur_blocks and cur_len + 2 + block_len > max_chars:
             flush()
@@ -181,8 +267,25 @@ def _make_chunks(blocks: list[Block], max_chars: int) -> list[dict[str, object]]
         else:
             cur_blocks.append(block)
             cur_len += 2 + block_len
-
     flush()
+    return chunks
+
+
+def _make_chunks(blocks: list[Block], max_chars: int) -> list[dict[str, object]]:
+    blocks = _normalize_blocks(blocks, max_chars=max_chars)
+    sections = _group_blocks_into_sections(blocks)
+    chunks: list[dict[str, object]] = []
+    for section_path, sec_blocks in sections:
+        if not sec_blocks:
+            continue
+        if _is_references_section(section_path):
+            chunks.extend(_chunks_for_references_section(section_path, sec_blocks))
+        else:
+            chunks.extend(
+                _chunks_for_body_section(section_path, sec_blocks, max_chars=max_chars),
+            )
+    for i, ch in enumerate(chunks):
+        ch["chunk_index"] = i
     return chunks
 
 
@@ -238,6 +341,7 @@ def _split_malformed_image_block(block: Block) -> list[Block]:
                 has_image_ref=bool(refs),
                 image_refs=refs,
                 heading=block.heading,
+                heading_level=block.heading_level,
             )
         )
     return out
@@ -248,19 +352,23 @@ def _split_large_block_by_lines(block: Block, max_chars: int) -> list[Block]:
     out: list[Block] = []
     cur: list[str] = []
     cur_len = 0
+    piece_idx = 0
     for line in lines:
         line_len = len(line) if not cur else len(line) + 1
         if cur and cur_len + line_len > max_chars:
             text = "\n".join(cur).strip("\n")
             refs = [m.group(1) for m in (IMAGE_LINE_RE.match(x) for x in cur) if m]
+            keep_heading = piece_idx == 0
             out.append(
                 Block(
                     text=text,
                     has_image_ref=bool(refs),
                     image_refs=refs,
-                    heading=block.heading,
+                    heading=block.heading if keep_heading else None,
+                    heading_level=block.heading_level if keep_heading else None,
                 )
             )
+            piece_idx += 1
             cur = [line]
             cur_len = len(line)
         else:
@@ -269,12 +377,14 @@ def _split_large_block_by_lines(block: Block, max_chars: int) -> list[Block]:
     if cur:
         text = "\n".join(cur).strip("\n")
         refs = [m.group(1) for m in (IMAGE_LINE_RE.match(x) for x in cur) if m]
+        keep_heading = piece_idx == 0
         out.append(
             Block(
                 text=text,
                 has_image_ref=bool(refs),
                 image_refs=refs,
-                heading=block.heading,
+                heading=block.heading if keep_heading else None,
+                heading_level=block.heading_level if keep_heading else None,
             )
         )
     return out if out else [block]
@@ -390,6 +500,7 @@ def _load_chunk_preview(rag_jsonl_path: Path, limit: int) -> list[dict[str, obje
                 "char_count": rec.get("char_count"),
                 "has_image_ref": rec.get("has_image_ref"),
                 "section_path": rec.get("section_path"),
+                "chunk_kind": rec.get("chunk_kind"),
                 "text_preview": str(rec.get("text", "") or "")[:300],
             }
         )
@@ -424,7 +535,11 @@ def main() -> int:
         "--max-chars",
         type=int,
         default=DEFAULT_MAX_CHARS,
-        help="Soft limit of characters per chunk. Atomic image blocks may exceed it.",
+        help=(
+            "Soft max chars per chunk within a section (heading-delimited). "
+            "Image+OCR atomic blocks may exceed this. "
+            "References / bibliography section is always one chunk regardless."
+        ),
     )
     parser.add_argument(
         "--show-chunks",

@@ -18,6 +18,11 @@ version: 1.0.0
 - LLM 不负责 PDF 放入，只处理已存在 PDF
 - 支持将 `raw/markdown` 切片为 `raw/rag`（用于检索）
 
+## 与 LLM wiki 文档目录的关系
+
+- 单篇文献 wiki：路径与 `backend/llm-wiki/raw/markdown/` **镜像**（同相对路径、同 `.md` 主文件名；每篇一文件，分区见 `backend/llm-wiki/wiki/_templates/paper.md`）。
+- 跨多篇合成：`backend/llm-wiki/wiki/_synthesis/`。维护规则见 `backend/llm-wiki/AGENTS.md`。
+
 ## 脚本入口
 
 提供三种模式：
@@ -81,6 +86,7 @@ python firefly/skills/markdown/scripts/markdown_to_rag.py --markdown backend/llm
 
 RAG 切片模式返回：
 
+- 切片策略：按 Markdown **章节标题**分段，`section_path` 反映层级；**参考文献**（中英文标题）整节一条，`chunk_kind`: `"references"`。
 - `mode`（`batch` 或 `single`）
 - `converted` / `result`
 - `failed`（批量模式）

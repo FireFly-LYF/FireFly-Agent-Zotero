@@ -10,9 +10,9 @@ Boundary: the LLM does not ingest files into `raw/`; file placement is handled b
 Classic RAG re-discovers evidence every time you ask a question.
 LLM Wiki compiles knowledge into a maintained markdown codebase:
 
-- new paper arrives -> integrate into structured pages
+- new paper arrives -> one mirrored markdown page under `wiki/` plus optional updates to cross-paper synthesis files
 - conflicts are marked, not silently overwritten
-- comparisons and overviews get continuously refined
+- cross-paper comparisons and field-level overviews live under `wiki/_synthesis/` and are kept evidence-linked
 
 Over time, answers become faster, deeper, and more consistent because synthesis is
 already materialized in the wiki layer.
@@ -38,11 +38,8 @@ Rules:
 
 Located under `wiki/`:
 
-- `entities/`: paper/dataset/author/lab pages
-- `concepts/`: methods, paradigms, frameworks
-- `themes/`: topic-level synthesis
-- `tables/`: structured comparisons
-- `overviews/`: high-level landscape and roadmap
+- **Mirrored pages**: for `raw/markdown/<relpath>/<name>.md` (often produced from `raw/pdf/<relpath>/<name>.pdf`), maintain **exactly one** `wiki/<relpath>/<name>.md` (**same tree and basename as markdown**). Inside that file, use the section layout in `wiki/_templates/paper.md` (entity, concepts, per-paper theme notes, per-paper comparisons, overview/navigation, sources).
+- **`wiki/_synthesis/`**: cross-paper artifacts (topic surveys, multi-paper tables, roadmaps). Each file must cite backing `raw/...` paths and relevant per-paper `wiki/.../*.md` links.
 
 ### 3) Schema (discipline)
 
@@ -59,29 +56,26 @@ Located under `wiki/`:
 
 When a new paper has already been synchronized from local Zotero:
 
-1. Read source from `raw/pdf` or `raw/markdown`
+1. Read factual text from `raw/markdown` (PDF pipeline lands here first)
 2. Extract:
    - problem statement
    - method and novelty
    - setup (datasets, metrics, baselines)
    - key quantitative results
    - limitations and open questions
-3. Update impacted pages:
-   - paper entity page
-   - related concept page
-   - theme synthesis
-   - comparison tables
-4. Add explicit source links for key claims
-5. Mark contradictions with prior evidence
+3. Create or update the **mirrored** `wiki/<relpath>/<stem>.md` for that PDF (see template)
+4. If the finding affects multiple papers or field-level themes, update or add files under `wiki/_synthesis/`
+5. Add explicit source links for key claims (**`raw/markdown/...`**, mirroring the wiki path; note pending PDF only if `.md` does not exist yet)
+6. Mark contradictions with prior evidence (preferably in `_synthesis` with backlinks to per-paper pages)
 
 ### Query
 
 When user asks a research question:
 
-1. Scan `wiki/entities|concepts|themes|tables|overviews`
-2. Read top relevant pages (themes and tables first)
-3. Compose answer with evidence links
-4. Optionally write a reusable analysis page back to wiki
+1. Check `wiki/_synthesis/` for existing surveys or comparison tables
+2. Read relevant mirrored per-paper pages under `wiki/`
+3. Compose answer with evidence links (`raw` + `wiki`)
+4. Optionally write reusable synthesis back to `_synthesis/` or update the per-paper page
 
 ### Lint
 
@@ -89,15 +83,15 @@ Periodic maintenance:
 
 - stale claims superseded by newer papers
 - missing citations
-- orphan pages
-- concept pages lacking comparisons
+- Markdown files under `raw/markdown` missing a mirrored `wiki/**/*.md`
+- synthesis files lacking evidence links
 - unresolved contradictions
 
 ## Recommended output format for answers
 
 1. Synthesis paragraph (what we know now)
-2. Comparison block (method/setting/metric)
-3. Evidence list (wiki page + raw source path)
+2. Comparison block (method/setting/metric) with links to `_synthesis` or tables therein
+3. Evidence list (mirrored wiki page + **`raw/markdown/...`** path as primary traceability)
 4. Open questions
 
 ## Why this is effective for research

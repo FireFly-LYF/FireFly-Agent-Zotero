@@ -20,3 +20,6 @@
 2、增加markdown skill，可实现pdf->markdown, markdown->rag chunks;  
 3、实现RAG链路，切分raw/markdown至raw/rag，使用相关性粗召回;  
 4、当前检索仅rag，尚未对LLM wiki进行维护，这是下一步的工作目标。
+
+2026.5.7  
+1、LLM wiki 维护层与 `raw/markdown/` 目录镜像：每篇文献对应 `wiki/` 下同路径单个 `.md`（内部分区见 `wiki/_templates/paper.md`）；跨篇放在 `wiki/_synthesis/`；已更新 `backend/llm-wiki` 下规范文档。

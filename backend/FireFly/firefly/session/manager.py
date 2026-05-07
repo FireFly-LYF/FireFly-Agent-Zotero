@@ -36,9 +36,19 @@ class Session:
         self.updated_at = datetime.now()
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a legal tool-call boundary."""
+        """Return unconsolidated messages for LLM input, aligned to a legal tool-call boundary.
+
+        ``max_messages > 0``：只取未固化段落的**最后** N 条（按条数，非按 token）。
+
+        ``max_messages <= 0``：**不限制条数**（取全部未固化消息）。注意 ``-0`` 在 Python
+        切片中等价于从开头取，因此 ``0`` 与负数均表示“不截断条数”，由上层再按 token 做
+        ``_snip_history`` 等治理。
+        """
         unconsolidated = self.messages[self.last_consolidated:]
-        sliced = unconsolidated[-max_messages:]
+        if max_messages and max_messages > 0:
+            sliced = unconsolidated[-max_messages:]
+        else:
+            sliced = unconsolidated
 
         # Avoid starting mid-turn when possible.
         for i, message in enumerate(sliced):

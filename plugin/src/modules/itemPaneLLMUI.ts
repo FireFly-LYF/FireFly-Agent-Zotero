@@ -84,6 +84,8 @@ export function registerLLMItemPaneSection() {
         role: "user" | "assistant";
         content: string;
         reasoning_content?: string;
+        /** 发送时当前 Zotero 条目题名（与后端会话 JSONL 中 literature_title 一致） */
+        literature_title?: string;
       };
       const chatTabs: TabState[] = [];
       const MAX_CHAT_TABS = 4;
@@ -484,6 +486,17 @@ export function registerLLMItemPaneSection() {
         const fromDisplayTitle = String((currentItem as any).getDisplayTitle?.() || "").trim();
         if (fromDisplayTitle) return fromDisplayTitle;
         return fallback;
+      };
+      /** 当前选中条目的文献题名（优先 Zotero「标题」字段） */
+      const resolveCurrentLiteratureTitle = (): string => {
+        const selectedItems = ztoolkit.getGlobal("ZoteroPane")?.getSelectedItems?.() ?? [];
+        const currentItem = selectedItems[0] ?? item;
+        if (!currentItem) return "";
+        const title = String((currentItem as any).getField?.("title") || "").trim();
+        if (title) return title;
+        const display = String((currentItem as any).getDisplayTitle?.() || "").trim();
+        if (display) return display;
+        return String((currentItem as any).getFilename?.() || "").trim();
       };
       const currentPDFName = resolveCurrentPDFName();
       const inferImageExtension = (mime: string) => {
@@ -1029,7 +1042,9 @@ export function registerLLMItemPaneSection() {
         convertBtn.disabled = disabled;
         convertBtn.style.opacity = disabled ? "0.5" : "1";
         convertBtn.style.cursor = disabled ? "not-allowed" : "pointer";
-        convertBtn.title = disabled ? "流萤正在处理文献…" : "将当前 PDF 转为 Markdown 并写入本地 RAG 索引";
+        convertBtn.title = disabled
+          ? "流萤正在处理文献…"
+          : "将当前 PDF 转为 Markdown 并写入 RAG；若 Markdown/RAG 已存在，将跳过 PDF 转换并重新切片覆盖 RAG";
       };
       const triggerCurrentPdfMarkdownConversion = async () => {
         if (isConvertingLiterature) return;
@@ -1058,6 +1073,7 @@ export function registerLLMItemPaneSection() {
             pdf_dir: pdfInfo.pdfDir,
             pdf_name: pdfInfo.pdfName,
             wiki_pdf_path: pdfInfo.wikiPdfPath,
+            rebuild_rag: true,
           });
           hasReceivedLiterature = true;
           (globalThis as any).__fireflyWikiPdfReceived = true;
@@ -1083,16 +1099,23 @@ export function registerLLMItemPaneSection() {
           const markdownPath = String((result as any)?.markdown_path || "").trim();
           const convertMsg =
             String((result as any)?.reason || "").trim() === "already_converted"
-              ? `Markdown 已存在${markdownPath ? `: ${markdownPath}` : ""}`
-              : `Markdown 转换完成${markdownPath ? `: ${markdownPath}` : ""}`;
+              ? `Markdown 已存在（未重转 PDF）${markdownPath ? `：${markdownPath}` : ""}`
+              : `Markdown 转换完成${markdownPath ? `：${markdownPath}` : ""}`;
           const ragPath = String((result as any)?.rag_path || "").trim();
           const ragChunks = Number((result as any)?.rag_chunk_count ?? 0);
+          const ragReindexed = Boolean((result as any)?.rag_reindexed);
           const ragLine =
-            Number.isFinite(ragChunks) && ragChunks > 0
-              ? `RAG 索引已更新：${ragChunks} 段${ragPath ? ` → ${ragPath}` : ""}`
-              : ragPath
-                ? `RAG 索引已更新 → ${ragPath}`
-                : "RAG 索引已更新";
+            ragReindexed && Number.isFinite(ragChunks) && ragChunks > 0
+              ? `RAG 已重新切片：${ragChunks} 段${ragPath ? ` → ${ragPath}` : ""}`
+              : ragReindexed && ragPath
+                ? `RAG 已重新切片 → ${ragPath}`
+                : Number.isFinite(ragChunks) && ragChunks > 0
+                  ? `RAG 索引已更新：${ragChunks} 段${ragPath ? ` → ${ragPath}` : ""}`
+                  : ragPath
+                    ? `RAG 索引已更新 → ${ragPath}`
+                    : ragReindexed
+                      ? "RAG 已重新切片"
+                      : "RAG 索引已更新";
           const mirrorNote = wikiMirrorJustCopied ? "已从 Zotero 补全 wiki 目录中的 PDF 副本。\n" : "";
           appendBubble("system", `${mirrorNote}${convertMsg}\n${ragLine}`);
         } catch (e) {
@@ -2288,6 +2311,7 @@ export function registerLLMItemPaneSection() {
                     role: row.role,
                     content: String(row.content || ""),
                     reasoning_content: String(row.reasoning_content || ""),
+                    literature_title: String(row.literature_title || "").trim() || undefined,
                   }) as ChatRecord,
               );
             chatHistoryByTab.set(tabId, restored);
@@ -2350,7 +2374,12 @@ export function registerLLMItemPaneSection() {
         const userDisplayText =
           message || (mediaPaths.length > 0 ? `[已附带 ${mediaPaths.length} 张图片]` : "(空消息)");
         appendUserMessage(userDisplayText);
-        getTabHistory(activeTabId).push({ role: "user", content: userDisplayText });
+        const literatureTitle = resolveCurrentLiteratureTitle();
+        const userRecord: ChatRecord = { role: "user", content: userDisplayText };
+        if (literatureTitle) {
+          userRecord.literature_title = literatureTitle;
+        }
+        getTabHistory(activeTabId).push(userRecord);
         activeStreamAbortController = createAbortControllerCompat();
         syncSendButtonState(true);
         ztoolkit.log("[llm-ui] sending:", messageWithContext);
@@ -2404,6 +2433,7 @@ export function registerLLMItemPaneSection() {
               scrollConversationToBottom();
             },
             activeStreamAbortController.signal,
+            literatureTitle,
           );
           const parsed = splitThinkingAndAnswer(streamedText);
           if (thinkingState === "Enable") {
@@ -2425,14 +2455,18 @@ export function registerLLMItemPaneSection() {
           const cleanAnswer = sanitizeAssistantText(
             finalParsed.answer || String(assistant.answerBubble.textContent || "").trim(),
           );
-          getTabHistory(activeTabId).push({
+          const assistantRecord: ChatRecord = {
             role: "assistant",
             content: cleanAnswer || "(无输出)",
             reasoning_content:
               thinkingState === "Enable"
                 ? [streamedThinking, finalParsed.thinking].filter((s) => !!s && s.trim()).join("\n\n")
                 : "",
-          });
+          };
+          if (literatureTitle) {
+            assistantRecord.literature_title = literatureTitle;
+          }
+          getTabHistory(activeTabId).push(assistantRecord);
         } catch (e) {
           const msg = String((e as any)?.message || e || "");
           const aborted =

@@ -45,6 +45,29 @@ if TYPE_CHECKING:
 
 UNIFIED_SESSION_KEY = "unified:default"
 
+# Zotero 面板轮次多时，不宜把全部未固化消息都塞进 LLM（虽仍有 runner 的 token 裁剪，
+# 但条数过多时容易在预算内挤进多轮旧话题，使模型延续无关上下文）。
+ZOTERO_LLM_HISTORY_MAX_MESSAGES = 32
+
+
+def _llm_history_max_messages_for_channel(channel: str) -> int:
+    if channel == "zotero":
+        return ZOTERO_LLM_HISTORY_MAX_MESSAGES
+    return 0
+
+
+def _coerce_literature_title_from_metadata(metadata: dict[str, Any] | None) -> str | None:
+    """Bridge / 插件传入的当前文献名称；写入会话 JSONL，不参与 LLM messages。"""
+    if not metadata:
+        return None
+    raw = metadata.get("literature_title")
+    if raw is None:
+        raw = metadata.get("literatureTitle")
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s or None
+
 
 class _LoopHook(AgentHook):
     """主循环使用的核心钩子。"""
@@ -697,7 +720,7 @@ class AgentLoop:
 
             await self.consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=0)
+            history = session.get_history(max_messages=_llm_history_max_messages_for_channel(channel))
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
 
             messages = self.context.build_messages(
@@ -710,7 +733,8 @@ class AgentLoop:
                 messages, session=session, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
-            self._save_turn(session, all_msgs, 1 + len(history))
+            lit_title = _coerce_literature_title_from_metadata(msg.metadata)
+            self._save_turn(session, all_msgs, 1 + len(history), literature_title=lit_title)
             self._clear_runtime_checkpoint(session)
             self.sessions.save(session)
             self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
@@ -745,7 +769,7 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(max_messages=0)
+        history = session.get_history(max_messages=_llm_history_max_messages_for_channel(msg.channel))
 
         initial_messages = self.context.build_messages(
             history=history,
@@ -782,8 +806,12 @@ class AgentLoop:
         # 导致恢复后用户提示词会静默丢失。提前保存
         # 可以仅凭会话日志恢复。
         user_persisted_early = False
+        lit_title = _coerce_literature_title_from_metadata(msg.metadata)
         if isinstance(msg.content, str) and msg.content.strip():
-            session.add_message("user", msg.content)
+            if lit_title:
+                session.add_message("user", msg.content, literature_title=lit_title)
+            else:
+                session.add_message("user", msg.content)
             self._mark_pending_user_turn(session)
             self.sessions.save(session)
             user_persisted_early = True
@@ -808,7 +836,7 @@ class AgentLoop:
 
         # 保存本轮时跳过已提前持久化的用户消息
         save_skip = 1 + len(history) + (1 if user_persisted_early else 0)
-        self._save_turn(session, all_msgs, save_skip)
+        self._save_turn(session, all_msgs, save_skip, literature_title=lit_title)
         self._clear_pending_user_turn(session)
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
@@ -877,7 +905,14 @@ class AgentLoop:
 
         return filtered
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
+    def _save_turn(
+        self,
+        session: Session,
+        messages: list[dict],
+        skip: int,
+        *,
+        literature_title: str | None = None,
+    ) -> None:
         """将本轮新消息保存到会话，并截断过大的工具结果。"""
         from datetime import datetime
 
@@ -919,6 +954,8 @@ class AgentLoop:
                         continue
                     entry["content"] = filtered
             entry.setdefault("timestamp", datetime.now().isoformat())
+            if literature_title:
+                entry["literature_title"] = literature_title
             session.messages.append(entry)
         session.updated_at = datetime.now()
 
