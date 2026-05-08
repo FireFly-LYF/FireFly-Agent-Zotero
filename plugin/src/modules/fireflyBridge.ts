@@ -429,6 +429,8 @@ export async function convertCurrentPdfToMarkdown(payload: {
   wiki_pdf_path?: string;
   /** 默认 true：即便已有 RAG，也按当前 Markdown 重新切片并覆盖 jsonl */
   rebuild_rag?: boolean;
+  /** 仅高级用途：为 true 时从 PDF 覆盖已有 .md；默认 false（有 .md 则只重建 RAG） */
+  force_markdown?: boolean;
 }) {
   const body = JSON.stringify({
     pdf_path: String(payload.pdf_path || "").trim(),
@@ -436,6 +438,7 @@ export async function convertCurrentPdfToMarkdown(payload: {
     pdf_name: String(payload.pdf_name || "").trim(),
     wiki_pdf_path: String(payload.wiki_pdf_path || "").trim(),
     rebuild_rag: payload.rebuild_rag !== false,
+    force_markdown: payload.force_markdown === true,
   });
   try {
     const resp = await zoteroHttpRequest("POST", BRIDGE_CONVERT_MARKDOWN_URL, {

@@ -1,4 +1,4 @@
-"""按 ``cli.json`` 的 ``llm_input_print`` 将 LLM 请求拆成若干段用于终端展示（不发往 API）。"""
+"""按 ``user.json`` 的 ``llm_input_print`` 将 LLM 请求拆成若干段用于终端展示（不发往 API）。"""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def build_partitioned_llm_display(
 
 
 def build_llm_display_payload(prefs: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    """根据 ``cli.json`` 偏好返回整段脱敏 JSON 或分段结构。
+    """根据 ``user.json`` 偏好返回整段脱敏 JSON 或分段结构。
 
     未配置 ``llm_input_print`` 时：与原先一致，输出整份脱敏后的请求。
     配置了 ``llm_input_print`` 对象时：仅输出对应子项为 true 的段落（工具段为未脱敏的 definitions + 消息）。

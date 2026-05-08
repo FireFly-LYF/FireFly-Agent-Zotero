@@ -15,6 +15,7 @@ from loguru import logger
 
 from firefly.agent.autocompact import AutoCompact
 from firefly.agent.context import ContextBuilder
+from firefly.zotero_interface.utils import strip_zotero_user_content_for_session_storage
 from firefly.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from firefly.agent.memory import Consolidator, Dream
 from firefly.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunSpec, AgentRunner
@@ -808,10 +809,13 @@ class AgentLoop:
         user_persisted_early = False
         lit_title = _coerce_literature_title_from_metadata(msg.metadata)
         if isinstance(msg.content, str) and msg.content.strip():
+            user_to_store = strip_zotero_user_content_for_session_storage(msg.content)
+            if not user_to_store.strip():
+                user_to_store = msg.content
             if lit_title:
-                session.add_message("user", msg.content, literature_title=lit_title)
+                session.add_message("user", user_to_store, literature_title=lit_title)
             else:
-                session.add_message("user", msg.content)
+                session.add_message("user", user_to_store)
             self._mark_pending_user_turn(session)
             self.sessions.save(session)
             user_persisted_early = True
@@ -953,6 +957,10 @@ class AgentLoop:
                     if not filtered:
                         continue
                     entry["content"] = filtered
+                if isinstance(entry.get("content"), str):
+                    entry["content"] = strip_zotero_user_content_for_session_storage(
+                        str(entry.get("content") or "")
+                    )
             entry.setdefault("timestamp", datetime.now().isoformat())
             if literature_title:
                 entry["literature_title"] = literature_title

@@ -53,7 +53,7 @@ def get_cli_history_path() -> Path:
 
 
 def get_cli_prefs_path() -> Path:
-    """Return ``cli.json`` path (same directory as ``config.json``)."""
+    """Return local prefs sidecar path (``user.json``; same directory as ``config.json``)."""
     from firefly.config.cli_prefs import cli_prefs_path_for
 
     return cli_prefs_path_for(get_config_path())

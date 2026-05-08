@@ -18,10 +18,11 @@ backend/workspace/**
 !backend/workspace/**/.gitkeep
 # 勿将嵌套 .git 当作工作区内容提交
 backend/workspace/.git/
-# Local firefly instance（backend/config/）：只忽略密钥与本机状态；cli.json 可提交
+# Local firefly instance（backend/config/）：忽略密钥与本机状态；user.json 为可选提交的轻量偏好
 backend/config/config.json
 backend/config/context.json
 backend/config/history/
+backend/config/*.local.json
 backend/llm-wiki/raw/pdf/**
 !backend/llm-wiki/raw/pdf/.gitkeep
 backend/llm-wiki/raw/markdown/**

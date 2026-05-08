@@ -6,5 +6,9 @@
       "rag": true,
       "skills": false,
       "tools": false
+    },
+    "markdown_rag": {
+      "max_chars": 3200,
+      "show_chunk_preview_limit": 5
     }
   }

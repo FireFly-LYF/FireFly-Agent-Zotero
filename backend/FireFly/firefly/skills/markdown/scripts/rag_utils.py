@@ -19,6 +19,125 @@ from typing import Any
 _RAG_NUM_HEADING_START_RE = re.compile(r"^(\d+)(\.\d+)*(\s|$)")
 
 
+def _strip_heading_markdown_noise(segment: str) -> str:
+    """去掉标题里的 Markdown 加粗等，便于解析 **4.2** 这类期刊标题。"""
+    s = re.sub(r"\*+", "", segment)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def segment_leading_numeric_tuple(segment: str) -> tuple[int, ...] | None:
+    """
+    从路径片段解析前导章节号：**4.2** 干扰有效性 -> (4, 2)；无编号则 None。
+    """
+    s = _strip_heading_markdown_noise(segment)
+    if not s:
+        return None
+    m = re.match(r"^(\d+(?:\.\d+)*)", s)
+    if not m:
+        return None
+    try:
+        return tuple(int(x) for x in m.group(1).split("."))
+    except ValueError:
+        return None
+
+
+def extract_query_numeric_prefixes(query: str) -> list[tuple[int, ...]]:
+    """从用户问题中提取章节号意图，如 4.2.1、4.2、单独 4（长者优先）。"""
+    out: list[tuple[int, ...]] = []
+    # 勿匹配标识符内的数字（如 unique_h1 中的 1）
+    for m in re.finditer(r"(?<![A-Za-z0-9_])\d+(?:\.\d+)*(?![A-Za-z0-9_])", query or ""):
+        raw = m.group(0)
+        # 减少「2024」等年份被当成章节号
+        if re.fullmatch(r"20\d{2}|19\d{2}", raw):
+            continue
+        try:
+            out.append(tuple(int(x) for x in raw.split(".")))
+        except ValueError:
+            continue
+    out.sort(key=lambda t: (-len(t), t))
+    seen: set[tuple[int, ...]] = set()
+    uniq: list[tuple[int, ...]] = []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
+
+
+def numeric_section_boost_score(
+    seg_tuple: tuple[int, ...],
+    query_tuple: tuple[int, ...],
+) -> int:
+    """
+    seg 与查询章节号的匹配强度。
+    - seg 与 query 前缀一致且 seg 更深或同级：最高（用户问 4.2，命中 4.2 / 4.2.1）
+    - seg 为 query 的真前缀：中等（用户问 4.2.1，命中 4.2 父节）
+    """
+    if not seg_tuple or not query_tuple:
+        return 0
+    # 命中小节或其子节
+    if len(seg_tuple) >= len(query_tuple) and seg_tuple[: len(query_tuple)] == query_tuple:
+        return 500_000 + 10_000 * len(query_tuple) + 100 * len(seg_tuple)
+    # 仅命中父级编号
+    if len(seg_tuple) < len(query_tuple) and query_tuple[: len(seg_tuple)] == seg_tuple:
+        return 50_000 + 1_000 * len(seg_tuple)
+    return 0
+
+
+def _best_numeric_boost_for_paths(section_path: str, parent_path: str, query_nums: list[tuple[int, ...]]) -> int:
+    """对 section_path / parent_section_path 各段计算编号匹配最高分。"""
+    if not query_nums:
+        return 0
+    paths = [section_path, parent_path]
+    best = 0
+    for p in paths:
+        if not str(p).strip():
+            continue
+        for seg in [s.strip() for s in str(p).split(">") if s.strip()]:
+            st = segment_leading_numeric_tuple(seg)
+            if not st:
+                continue
+            for qn in query_nums:
+                best = max(best, numeric_section_boost_score(st, qn))
+    return best
+
+
+def title_heading_overlap_boost(segment: str, query_raw: str) -> int:
+    """去掉编号后的章节标题若完整出现在用户问题中，给予强加成（如「干扰有效性验证」）。"""
+    if not segment or not query_raw:
+        return 0
+    cleaned = _strip_heading_markdown_noise(segment)
+    m = re.match(r"^\d+(?:\.\d+)*\s*(.+)$", cleaned)
+    title_rest = m.group(1).strip() if m else cleaned
+    if len(title_rest) < 3:
+        return 0
+    if title_rest in query_raw:
+        return 80_000
+    return 0
+
+
+def _best_title_overlap_for_paths(section_path: str, query_raw: str) -> int:
+    if not section_path or not str(query_raw).strip():
+        return 0
+    best = 0
+    for seg in [s.strip() for s in section_path.split(">") if s.strip()]:
+        best = max(best, title_heading_overlap_boost(seg, query_raw.strip()))
+    return best
+
+
+def _token_matches_chapter_num(tok: str, chapter_num: str) -> bool:
+    """避免「1」误命中「4.1」这类子串匹配。"""
+    cn = chapter_num.lower().strip()
+    t = (tok or "").lower().strip()
+    if not t or not cn:
+        return False
+    if t == cn:
+        return True
+    if cn.startswith(t + "."):
+        return True
+    return False
+
+
 def tokenize_rag_query(text: str) -> list[str]:
     """
     中英文混合粗分词。
@@ -35,10 +154,13 @@ def tokenize_rag_query(text: str) -> list[str]:
         "4.2节的仿真" -> ["4.2", "节的仿真"]
         "Introduction" -> ["introduction"]
     """
-    # 匹配：中文片段 | 数字+小数点组合 | 英文单词（2+字符）
+    # 匹配：中文片段 | 数字（含 4.2） | 英文标识符（含 unique_h1，避免拆成 1、2）
     return [
         tok.lower()
-        for tok in re.findall(r"[\u4e00-\u9fff]+|\d+(?:\.\d+)*|[A-Za-z_]{2,}", text or "")
+        for tok in re.findall(
+            r"[\u4e00-\u9fff]+|\d+(?:\.\d+)*|[A-Za-z_][A-Za-z0-9_]*",
+            text or "",
+        )
         if tok
     ]
 
@@ -56,6 +178,9 @@ def rag_numeric_chapter_root(section_path: str) -> str | None:
     if not section_path or not str(section_path).strip():
         return None
     last = str(section_path).split(">")[-1].strip()
+    tup = segment_leading_numeric_tuple(last)
+    if tup:
+        return str(tup[0])
     m = _RAG_NUM_HEADING_START_RE.match(last)
     return m.group(1) if m else None
 
@@ -75,6 +200,9 @@ def rag_chunk_in_numeric_chapter(section_path: str, chapter_root: str) -> bool:
         return False
     for seg in str(section_path).split(">"):
         s = seg.strip()
+        tup = segment_leading_numeric_tuple(s)
+        if tup and str(tup[0]) == chapter_root:
+            return True
         m = _RAG_NUM_HEADING_START_RE.match(s)
         if m and m.group(1) == chapter_root:
             return True
@@ -102,6 +230,9 @@ def section_belongs_to_chapter(section_path: str, chapter_prefix: str) -> bool:
     
     # 尝试数字章节匹配
     for seg in segments:
+        tup = segment_leading_numeric_tuple(seg)
+        if tup and str(tup[0]) == chapter_prefix:
+            return True
         m = _RAG_NUM_HEADING_START_RE.match(seg)
         if m and m.group(1) == chapter_prefix:
             return True
@@ -143,8 +274,9 @@ def retrieve_rag_chunks_with_chapter_expansion(
     if not rag_jsonl_path.is_file():
         return []
 
-    tokens = tokenize_rag_query(query)
-    if not tokens:
+    query_nums = extract_query_numeric_prefixes(query or "")
+    tokens = tokenize_rag_query(query or "")
+    if not tokens and not query_nums:
         return []
 
     try:
@@ -169,6 +301,7 @@ def retrieve_rag_chunks_with_chapter_expansion(
     section_matched: list[tuple[int, dict[str, Any]]] = []
     for rec in records:
         section_path = str(rec.get("section_path", "") or "")
+        parent_path = str(rec.get("parent_section_path", "") or "")
         if not section_path:
             continue
         
@@ -176,41 +309,38 @@ def retrieve_rag_chunks_with_chapter_expansion(
         segments = [seg.strip() for seg in section_path.split(">") if seg.strip()]
         if not segments:
             continue
+
+        nb = _best_numeric_boost_for_paths(section_path, parent_path, query_nums)
+        tb = _best_title_overlap_for_paths(section_path, query or "")
         
         # 对每个层级的章节名进行匹配，优先匹配最深层（最具体的章节名）
-        best_score = 0
+        token_segment_best = 0
         for depth_idx, segment in enumerate(segments):
-            segment_lower = segment.lower()
+            cleaned = _strip_heading_markdown_noise(segment)
+            segment_lower = cleaned.lower()
             
-            # 分离章节号和章节名（如 "4.3 仿真结果" -> "4.3" + "仿真结果"）
-            chapter_num_match = _RAG_NUM_HEADING_START_RE.match(segment)
-            if chapter_num_match:
-                # 有章节号的情况
-                chapter_num = chapter_num_match.group(0).strip()
-                chapter_title = segment[len(chapter_num):].strip()
+            # 分离章节号和章节名（支持 **4.3** 仿真结果）
+            m_num = re.match(r"^(\d+(?:\.\d+)*)", cleaned)
+            if m_num:
+                chapter_num = m_num.group(1).strip()
+                chapter_title = cleaned[m_num.end() :].strip()
                 
-                # 计算章节号匹配分数（权重较低）
-                num_score = sum(1 for tok in tokens if tok in chapter_num.lower())
-                
-                # 计算章节名匹配分数（权重较高）
+                num_score = sum(1 for tok in tokens if _token_matches_chapter_num(tok, chapter_num))
                 title_score = sum(1 for tok in tokens if tok in chapter_title.lower()) if chapter_title else 0
                 
-                # 组合分数：章节名权重 x3，章节号权重 x1
                 segment_score = title_score * 3 + num_score
             else:
-                # 纯文本章节名（如 "Introduction"）
                 segment_score = sum(1 for tok in tokens if tok in segment_lower)
             
-            # 更深层级的章节匹配权重更高（更具体）
             depth_weight = len(segments) - depth_idx
             weighted_score = segment_score * depth_weight
             
-            if weighted_score > best_score:
-                best_score = weighted_score
+            if weighted_score > token_segment_best:
+                token_segment_best = weighted_score
         
-        if best_score > 0:
-            # 章节匹配的基础权重 x100
-            section_matched.append((best_score * 100, rec))
+        combined = nb + tb + token_segment_best * 100
+        if combined > 0:
+            section_matched.append((combined, rec))
 
     # ========== 第二阶段：正文内容匹配 ==========
     content_scored: list[tuple[int, dict[str, Any]]] = []
@@ -239,6 +369,17 @@ def retrieve_rag_chunks_with_chapter_expansion(
             if len(hits) >= top_k:
                 break
 
+    # 两阶段均无命中时：整句中文 token 往往无法在正文整段出现，避免零召回
+    if not hits and records:
+        def _rec_idx(r: dict[str, Any]) -> int:
+            try:
+                return int(r.get("chunk_index", -1))
+            except (TypeError, ValueError):
+                return -1
+
+        ordered = sorted((r for r in records if _rec_idx(r) >= 0), key=_rec_idx)
+        hits = ordered[:top_k]
+
     # ========== 第三阶段：章节层级扩展 ==========
     # 提取所有命中的章节路径，并找出需要扩展的父章节
     expand_section_prefixes: set[str] = set()
@@ -258,8 +399,9 @@ def retrieve_rag_chunks_with_chapter_expansion(
                 expand_section_prefixes.add(root)
                 break  # 只取最外层数字章节
         
-        # 对于非数字章节，提取第一级章节名
-        if segments and not rag_numeric_chapter_root(segments[0]):
+        # 路径里已有编号小节时，不把第一级当作「文本章」（避免 D > 4.1 把 D 当成整篇扩展前缀）
+        has_numeric_segment = any(segment_leading_numeric_tuple(s) for s in segments)
+        if segments and not has_numeric_segment and not rag_numeric_chapter_root(segments[0]):
             expand_section_prefixes.add(segments[0])
 
     # 统计每个章节前缀的命中次数
@@ -322,36 +464,38 @@ def retrieve_rag_chunks_with_chapter_expansion(
         - 都相同时，按 chunk_index 排序（保持文档顺序）
         """
         section_path = str(rec.get("section_path", "") or "")
+        parent_path = str(rec.get("parent_section_path", "") or "")
         text = str(rec.get("text", "") or "")
         
-        # 计算章节匹配分数
-        section_score = 0
+        nb = _best_numeric_boost_for_paths(section_path, parent_path, query_nums)
+        tb = _best_title_overlap_for_paths(section_path, query or "")
+        section_score = nb + tb
+        token_best = 0
         if section_path:
             segments = [seg.strip() for seg in section_path.split(">") if seg.strip()]
             for depth_idx, segment in enumerate(segments):
-                segment_lower = segment.lower()
+                cleaned = _strip_heading_markdown_noise(segment)
+                segment_lower = cleaned.lower()
                 
-                # 分离章节号和章节名
-                chapter_num_match = _RAG_NUM_HEADING_START_RE.match(segment)
-                if chapter_num_match:
-                    chapter_num = chapter_num_match.group(0).strip()
-                    chapter_title = segment[len(chapter_num):].strip()
+                m_num = re.match(r"^(\d+(?:\.\d+)*)", cleaned)
+                if m_num:
+                    chapter_num = m_num.group(1).strip()
+                    chapter_title = cleaned[m_num.end() :].strip()
                     
-                    num_score = sum(1 for tok in tokens if tok in chapter_num.lower())
+                    num_score = sum(1 for tok in tokens if _token_matches_chapter_num(tok, chapter_num))
                     title_score = sum(1 for tok in tokens if tok in chapter_title.lower()) if chapter_title else 0
                     
                     segment_score = title_score * 3 + num_score
                 else:
                     segment_score = sum(1 for tok in tokens if tok in segment_lower)
                 
-                # 更深层级权重更高
                 depth_weight = len(segments) - depth_idx
                 weighted_score = segment_score * depth_weight
                 
-                if weighted_score > section_score:
-                    section_score = weighted_score
+                if weighted_score > token_best:
+                    token_best = weighted_score
+        section_score += token_best
         
-        # 计算内容匹配分数
         content_score = sum(1 for tok in tokens if tok in text.lower())
         
         # 获取 chunk_index（用于相同分数时保持文档顺序）

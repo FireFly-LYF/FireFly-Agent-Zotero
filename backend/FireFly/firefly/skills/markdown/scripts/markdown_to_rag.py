@@ -11,7 +11,15 @@ one JSONL file with chunk records.
 
 Chunking strategy:
 - Split by markdown headings (ATX / setext): each section is a logical chapter.
-- Within a section, merge blocks until --max-chars (same as before for oversized sections).
+- When headings use the same ATX level (e.g. journal PDFs use ## for both "4.2" and
+  "4.2.1"), infer hierarchy from leading numeric tokens (4 > 4.2 > 4.2.1) so
+  section_path includes the parent segment (e.g. "... > **4.2** ... > **4.2.1** ...").
+- Normalization alternates ATX splitting and line-based oversized splitting until
+  stable, so a ``##`` subsection that appears only after a long block is still
+  recognized (not stuck inside the parent's text chunk).
+- Subsections with three-part numbers (x.y.z) are emitted as a single chunk (no
+  max_chars splitting inside the subsection).
+- Within other sections, merge blocks until --max-chars (oversized sections).
 - The references / bibliography section is always emitted as exactly one chunk
   (even if longer than max_chars), tagged chunk_kind == "references".
 """
@@ -39,6 +47,8 @@ _REF_SECTION_HINT_RE = re.compile(
     r"(参考文献|引用文献|参考资料|references?|bibliography|cited\s+references)(\s|$|[\.．:：])",
     re.IGNORECASE,
 )
+# 标题行首编号：**4.2.1**、4.2.1、**10** 等（同一篇论文常全程用 ##）
+_NUMERIC_HEADING_PREFIX_RE = re.compile(r"^\s*\*{0,2}\s*(\d+(?:\.\d+)*)\s*\*{0,2}")
 
 
 @dataclass
@@ -159,12 +169,84 @@ def _paragraph_heading_meta(
     return None, None
 
 
+def _heading_meta_from_first_line(first_line: str) -> tuple[str | None, int | None]:
+    atx = ATX_HEADING_RE.match(first_line)
+    if atx:
+        return atx.group(2).strip(), len(atx.group(1))
+    return None, None
+
+
+def _split_block_at_atx_headings(block: Block) -> list[Block]:
+    """
+    超长块按行切开或 PDF 转写后，多个 ## 可能落在同一段落串里。
+    在任意 ATX 标题行处再拆分，避免子节标题被当作正文留在父节内。
+    """
+    lines = block.text.split("\n")
+    if len(lines) <= 1:
+        return [block]
+    segments: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        if ATX_HEADING_RE.match(line) and cur:
+            segments.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        segments.append(cur)
+    if len(segments) <= 1:
+        return [block]
+
+    out: list[Block] = []
+    for seg in segments:
+        text = "\n".join(seg).strip("\n")
+        if not text:
+            continue
+        h, hl = _heading_meta_from_first_line(seg[0])
+        refs = [m.group(1) for m in (IMAGE_LINE_RE.match(x) for x in seg) if m]
+        out.append(
+            Block(
+                text=text,
+                has_image_ref=bool(refs),
+                image_refs=refs,
+                heading=h,
+                heading_level=hl,
+            )
+        )
+    return out if out else [block]
+
+
 def _path_from_stack(stack: list[tuple[int, str]]) -> str:
     return " > ".join(title for _, title in stack)
 
 
+def _numeric_heading_segments(title: str) -> list[str] | None:
+    """标题前导编号片段，如 **4.2.1** xxx -> ['4','2','1']；无编号则 None。"""
+    if not title or not title.strip():
+        return None
+    first_line = title.strip().split("\n", 1)[0]
+    m = _NUMERIC_HEADING_PREFIX_RE.match(first_line)
+    if not m:
+        return None
+    return m.group(1).split(".")
+
+
+def _logical_heading_level(title: str, atx_level: int) -> int:
+    """
+    栈深度：优先用车尾论文编号层级（子节与父节同为 ## 时仍能区分）。
+    参考文献类等附录标题按顶层处理，便于与正文编号节并列。
+    """
+    segs = _numeric_heading_segments(title)
+    if segs:
+        return len(segs)
+    stripped = title.strip()
+    if _REF_SECTION_HINT_RE.search(stripped):
+        return 1
+    return atx_level
+
+
 def _group_blocks_into_sections(blocks: list[Block]) -> list[tuple[str, list[Block]]]:
-    """按 Markdown 标题层级切开：每个标题开启新章节，栈维护章节路径。"""
+    """按 Markdown 标题层级切开：栈维护章节路径（支持编号推断父子关系）。"""
     sections_out: list[tuple[str, list[Block]]] = []
     cur: list[Block] = []
     stack: list[tuple[int, str]] = []
@@ -174,9 +256,10 @@ def _group_blocks_into_sections(blocks: list[Block]) -> list[tuple[str, list[Blo
             if cur:
                 sections_out.append((_path_from_stack(stack), cur))
                 cur = []
-            while stack and stack[-1][0] >= block.heading_level:
+            logical_level = _logical_heading_level(block.heading, block.heading_level)
+            while stack and stack[-1][0] >= logical_level:
                 stack.pop()
-            stack.append((block.heading_level, block.heading))
+            stack.append((logical_level, block.heading))
         cur.append(block)
 
     if cur:
@@ -202,6 +285,7 @@ def _chunk_record(
     image_refs: list[str],
     *,
     chunk_kind: str | None = None,
+    parent_section_path: str | None = None,
 ) -> dict[str, object]:
     rec: dict[str, object] = {
         "chunk_index": chunk_index,
@@ -213,6 +297,8 @@ def _chunk_record(
     }
     if chunk_kind:
         rec["chunk_kind"] = chunk_kind
+    if parent_section_path:
+        rec["parent_section_path"] = parent_section_path
     return rec
 
 
@@ -226,7 +312,34 @@ def _chunks_for_references_section(section_path: str, sec_blocks: list[Block]) -
     for b in sec_blocks:
         if b.has_image_ref:
             image_refs.extend(b.image_refs)
-    return [_chunk_record(0, text, section_path, image_refs, chunk_kind="references")]
+    parent = _parent_path_from_section_path(section_path)
+    return [
+        _chunk_record(
+            0,
+            text,
+            section_path,
+            image_refs,
+            chunk_kind="references",
+            parent_section_path=parent or None,
+        )
+    ]
+
+
+def _parent_path_from_section_path(section_path: str) -> str:
+    parts = [p.strip() for p in section_path.split(">") if p.strip()]
+    if len(parts) <= 1:
+        return ""
+    return " > ".join(parts[:-1])
+
+
+def _section_is_atomic_subsubsection(sec_blocks: list[Block]) -> bool:
+    """三级编号节（如 4.2.1）：整节一条 chunk，不在节内按 max_chars 再拆。"""
+    for b in sec_blocks:
+        if b.heading:
+            segs = _numeric_heading_segments(b.heading)
+            if segs is not None and len(segs) >= 3:
+                return True
+    return False
 
 
 def _chunks_for_body_section(
@@ -234,11 +347,12 @@ def _chunks_for_body_section(
     sec_blocks: list[Block],
     *,
     max_chars: int,
+    atomic: bool = False,
 ) -> list[dict[str, object]]:
-    """普通章节：块依次并入，超长时在章节内按 max_chars 断开为多 chunk。"""
+    """普通章节：块依次并入；atomic 时整节一条 chunk；否则超长按 max_chars 断开。"""
     chunks: list[dict[str, object]] = []
-    cur_blocks: list[Block] = []
-    cur_len = 0
+    parent = _parent_path_from_section_path(section_path)
+    parent_kw = {"parent_section_path": parent or None}
 
     def flush() -> None:
         nonlocal cur_blocks, cur_len
@@ -253,13 +367,23 @@ def _chunks_for_body_section(
         for b in cur_blocks:
             if b.has_image_ref:
                 image_refs.extend(b.image_refs)
-        chunks.append(_chunk_record(len(chunks), text, section_path, image_refs))
+        chunks.append(
+            _chunk_record(len(chunks), text, section_path, image_refs, **parent_kw)
+        )
         cur_blocks = []
         cur_len = 0
 
+    if atomic and sec_blocks:
+        cur_blocks = list(sec_blocks)
+        cur_len = sum(len(b.text) + 2 for b in cur_blocks)
+        flush()
+        return chunks
+
+    cur_blocks = []
+    cur_len = 0
     for block in sec_blocks:
         block_len = len(block.text)
-        if cur_blocks and cur_len + 2 + block_len > max_chars:
+        if not atomic and cur_blocks and cur_len + 2 + block_len > max_chars:
             flush()
         if not cur_blocks:
             cur_blocks = [block]
@@ -282,11 +406,62 @@ def _make_chunks(blocks: list[Block], max_chars: int) -> list[dict[str, object]]
             chunks.extend(_chunks_for_references_section(section_path, sec_blocks))
         else:
             chunks.extend(
-                _chunks_for_body_section(section_path, sec_blocks, max_chars=max_chars),
+                _chunks_for_body_section(
+                    section_path,
+                    sec_blocks,
+                    max_chars=max_chars,
+                    atomic=_section_is_atomic_subsubsection(sec_blocks),
+                ),
             )
     for i, ch in enumerate(chunks):
         ch["chunk_index"] = i
     return chunks
+
+
+def _iteratively_split_for_rag(block: Block, max_chars: int) -> list[Block]:
+    """
+    交替：ATX 标题切分 ↔ 超长按行切分，直到稳定。
+    解决「先按行撕开大块后，中间的 ## 子节」不再被当作标题的问题。
+    """
+    wave = [block]
+    for _ in range(128):
+        next_wave: list[Block] = []
+        changed = False
+        for b in wave:
+            atx_parts = _split_block_at_atx_headings(b)
+            if len(atx_parts) > 1:
+                changed = True
+            for ap in atx_parts:
+                if len(ap.text) > max_chars:
+                    line_parts = _split_large_block_by_lines(ap, max_chars=max_chars)
+                    if len(line_parts) > 1:
+                        changed = True
+                    next_wave.extend(line_parts)
+                else:
+                    next_wave.append(ap)
+        wave = next_wave
+        if not changed:
+            break
+    # 兜底：仍超长则按字符硬切（极少见于正文单行极限）
+    final: list[Block] = []
+    for b in wave:
+        if len(b.text) <= max_chars:
+            final.append(b)
+            continue
+        piece_idx = 0
+        for i in range(0, len(b.text), max_chars):
+            chunk = b.text[i : i + max_chars]
+            final.append(
+                Block(
+                    text=chunk,
+                    has_image_ref=False,
+                    image_refs=[],
+                    heading=b.heading if piece_idx == 0 else None,
+                    heading_level=b.heading_level if piece_idx == 0 else None,
+                )
+            )
+            piece_idx += 1
+    return final
 
 
 def _normalize_blocks(blocks: list[Block], max_chars: int) -> list[Block]:
@@ -297,10 +472,7 @@ def _normalize_blocks(blocks: list[Block], max_chars: int) -> list[Block]:
         else:
             sub_blocks = [block]
         for sub in sub_blocks:
-            if len(sub.text) > max_chars:
-                normalized.extend(_split_large_block_by_lines(sub, max_chars=max_chars))
-            else:
-                normalized.append(sub)
+            normalized.extend(_iteratively_split_for_rag(sub, max_chars=max_chars))
     return normalized
 
 
@@ -347,8 +519,20 @@ def _split_malformed_image_block(block: Block) -> list[Block]:
     return out
 
 
+def _explode_lines_longer_than(lines: list[str], max_chars: int) -> list[str]:
+    """单行长度超过 max_chars 时强制折断，避免后续逻辑无法消化超大块。"""
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= max_chars:
+            out.append(line)
+            continue
+        for i in range(0, len(line), max_chars):
+            out.append(line[i : i + max_chars])
+    return out
+
+
 def _split_large_block_by_lines(block: Block, max_chars: int) -> list[Block]:
-    lines = block.text.split("\n")
+    lines = _explode_lines_longer_than(block.text.split("\n"), max_chars)
     out: list[Block] = []
     cur: list[str] = []
     cur_len = 0
@@ -479,6 +663,26 @@ def convert_all(markdown_root: Path, rag_root: Path, max_chars: int) -> dict[str
     }
 
 
+def _max_chars_from_firefly_prefs() -> int:
+    try:
+        from firefly.config.cli_prefs import get_markdown_rag_prefs
+        from firefly.config.loader import get_config_path
+
+        return int(get_markdown_rag_prefs(get_config_path())["max_chars"])
+    except Exception:
+        return DEFAULT_MAX_CHARS
+
+
+def _show_chunk_preview_limit_from_firefly_prefs() -> int:
+    try:
+        from firefly.config.cli_prefs import get_markdown_rag_prefs
+        from firefly.config.loader import get_config_path
+
+        return int(get_markdown_rag_prefs(get_config_path())["show_chunk_preview_limit"])
+    except Exception:
+        return 5
+
+
 def _load_chunk_preview(rag_jsonl_path: Path, limit: int) -> list[dict[str, object]]:
     if not rag_jsonl_path.exists() or not rag_jsonl_path.is_file():
         return []
@@ -500,6 +704,7 @@ def _load_chunk_preview(rag_jsonl_path: Path, limit: int) -> list[dict[str, obje
                 "char_count": rec.get("char_count"),
                 "has_image_ref": rec.get("has_image_ref"),
                 "section_path": rec.get("section_path"),
+                "parent_section_path": rec.get("parent_section_path"),
                 "chunk_kind": rec.get("chunk_kind"),
                 "text_preview": str(rec.get("text", "") or "")[:300],
             }
@@ -534,11 +739,15 @@ def main() -> int:
     parser.add_argument(
         "--max-chars",
         type=int,
-        default=DEFAULT_MAX_CHARS,
+        default=None,
         help=(
-            "Soft max chars per chunk within a section (heading-delimited). "
-            "Image+OCR atomic blocks may exceed this. "
-            "References / bibliography section is always one chunk regardless."
+            (
+                "Soft max chars per chunk within a section (heading-delimited). "
+                "Default: user.json ``markdown_rag.max_chars`` (else %s). "
+                "Image+OCR atomic blocks may exceed this. "
+                "References / bibliography section is always one chunk regardless."
+            )
+            % DEFAULT_MAX_CHARS
         ),
     )
     parser.add_argument(
@@ -549,15 +758,26 @@ def main() -> int:
     parser.add_argument(
         "--show-limit",
         type=int,
-        default=5,
-        help="Max chunk previews to show when --show-chunks is enabled.",
+        default=None,
+        help=(
+            "Max chunk previews when --show-chunks is enabled. "
+            "Default: user.json ``markdown_rag.show_chunk_preview_limit`` (else 5)."
+        ),
     )
     args = parser.parse_args()
 
     markdown_root = Path(args.markdown_root).expanduser().resolve()
     rag_root = Path(args.rag_root).expanduser().resolve()
-    max_chars = max(200, int(args.max_chars))
-    show_limit = max(1, int(args.show_limit))
+    max_chars = (
+        max(200, int(args.max_chars))
+        if args.max_chars is not None
+        else _max_chars_from_firefly_prefs()
+    )
+    show_limit = (
+        max(1, int(args.show_limit))
+        if args.show_limit is not None
+        else _show_chunk_preview_limit_from_firefly_prefs()
+    )
 
     single_markdown = str(args.markdown or "").strip()
     single_rag = str(args.rag or "").strip()

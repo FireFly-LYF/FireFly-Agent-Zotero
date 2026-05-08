@@ -1030,7 +1030,7 @@ export function registerLLMItemPaneSection() {
         })();
       });
 
-      const convertBtn = createToolBtn("PDF → Markdown → RAG（一键）");
+      const convertBtn = createToolBtn("Markdown → RAG（一键）");
       const convertIcon = ownerDoc.createElement("img");
       convertIcon.src = `${iconBase}/convert.svg`;
       convertIcon.alt = "convert";
@@ -1044,7 +1044,7 @@ export function registerLLMItemPaneSection() {
         convertBtn.style.cursor = disabled ? "not-allowed" : "pointer";
         convertBtn.title = disabled
           ? "流萤正在处理文献…"
-          : "将当前 PDF 转为 Markdown 并写入 RAG；若 Markdown/RAG 已存在，将跳过 PDF 转换并重新切片覆盖 RAG";
+          : "将当前文献切片写入 RAG：尚无 Markdown 时会从 PDF 生成；已有 Markdown 时只重建 RAG（不重转 PDF）";
       };
       const triggerCurrentPdfMarkdownConversion = async () => {
         if (isConvertingLiterature) return;
@@ -1097,10 +1097,11 @@ export function registerLLMItemPaneSection() {
           }
           syncContextBar();
           const markdownPath = String((result as any)?.markdown_path || "").trim();
+          const mdReason = String((result as any)?.reason || "").trim();
           const convertMsg =
-            String((result as any)?.reason || "").trim() === "already_converted"
-              ? `Markdown 已存在（未重转 PDF）${markdownPath ? `：${markdownPath}` : ""}`
-              : `Markdown 转换完成${markdownPath ? `：${markdownPath}` : ""}`;
+            mdReason === "already_converted"
+              ? `已有 Markdown，未从 PDF 重转${markdownPath ? `：${markdownPath}` : ""}`
+              : `Markdown 已就绪${markdownPath ? `：${markdownPath}` : ""}`;
           const ragPath = String((result as any)?.rag_path || "").trim();
           const ragChunks = Number((result as any)?.rag_chunk_count ?? 0);
           const ragReindexed = Boolean((result as any)?.rag_reindexed);
@@ -1873,14 +1874,18 @@ export function registerLLMItemPaneSection() {
           return `$${formula}$`;
         });
         
-        const lines = src.split("\n");
+        // 行首全角空格等与列表缩进相关的空白统一成半角，避免层级误判；不换掉正文中间空格。
+        const lines = src.split("\n").map((ln) => ln.replace(/\u3000/g, "  "));
         const out: string[] = [];
         let inCode = false;
         let inMathBlock = false;
         let mathLines: string[] = [];
+        /** 顶格 `-` 列表项序号（1）（2）…，遇标题/正文等非列表行重置 */
+        let mdUlNest0Serial = 0;
         for (const line of lines) {
           if (/^\s*```/.test(line)) {
             if (!inCode) {
+              mdUlNest0Serial = 0;
               inCode = true;
               // 外层限定为气泡/侧栏宽度并负责横向滚动；内层 pre 随内容变宽，避免“滚动条轨道跟整篇代码一样宽”
               out.push(
@@ -1908,6 +1913,7 @@ export function registerLLMItemPaneSection() {
               mathLines = [];
             } else {
               inMathBlock = false;
+              mdUlNest0Serial = 0;
               out.push(formatFormulaBlock(mathLines.join("\n")));
               mathLines = [];
             }
@@ -1919,15 +1925,18 @@ export function registerLLMItemPaneSection() {
           }
           const singleLineBlockFormula = line.trim().match(/^\$\$(.+)\$\$$/);
           if (singleLineBlockFormula) {
+            mdUlNest0Serial = 0;
             out.push(formatFormulaBlock(singleLineBlockFormula[1]));
             continue;
           }
           if (isStandaloneFormulaLine(line)) {
+            mdUlNest0Serial = 0;
             out.push(formatFormulaBlock(line));
             continue;
           }
           const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
           if (heading) {
+            mdUlNest0Serial = 0;
             const level = Math.min(6, heading[1].length);
             const size = level <= 2 ? "18px" : level <= 4 ? "16px" : "15px";
             const weight = level <= 2 ? "700" : "600";
@@ -1941,6 +1950,7 @@ export function registerLLMItemPaneSection() {
           // 「1. xxx」：行首仅少量空白时当作小节标题；缩进较多的「  1.」为有序列表，避免误用大号标题 + 过宽缩进。
           const numberedLine = line.match(/^(\s*)(\d{1,2})\.\s+(.*)$/);
           if (numberedLine) {
+            mdUlNest0Serial = 0;
             const indentWs = String(numberedLine[1] || "");
             const indentUnits = indentWs.replace(/\t/g, "  ").length;
             const num = String(numberedLine[2] || "");
@@ -1978,19 +1988,31 @@ export function registerLLMItemPaneSection() {
           if (list) {
             const indentWs = String(list[1] || "");
             const indentUnits = indentWs.replace(/\t/g, "  ").length;
-            const nest = Math.min(5, Math.floor(indentUnits / 2));
-            // 顶级顶格；子级再缩进。符号奇偶交替：避免连续两级都用「圆圈」类圆点。
+            // 每 4 列算一层；避免模型在「-」前习惯性加 2 半角空格时被误判成子级（缩进 + 小圆点）。
+            const nest = Math.min(5, Math.floor(indentUnits / 4));
+            // 顶级顶格；子级缩进。顶级用（1）（2）…；子级用大号实心圆点。
             const FIRST_NEST_PAD_PX = 14;
-            const NEST_STEP_PX = 10;
+            const NEST_STEP_PX = 12;
             const padLeft = nest <= 0 ? 0 : FIRST_NEST_PAD_PX + (nest - 1) * NEST_STEP_PX;
             const item = String(list[3] || "");
-            const bulletMark = nest % 2 === 0 ? "•" : "\u2013";
-            const bulletCellWidth = nest % 2 === 0 ? "1.05em" : "1.1em";
+            let bulletMark: string;
+            let bulletCellStyle: string;
+            if (nest <= 0) {
+              mdUlNest0Serial += 1;
+              bulletMark = `（${mdUlNest0Serial}）`;
+              bulletCellStyle =
+                `flex:0 0 auto;min-width:2.75em;text-align:left;line-height:inherit;user-select:none;` +
+                `font-size:15px;font-weight:600;color:rgba(0,0,0,0.82);letter-spacing:0.02em;`;
+            } else {
+              bulletMark = "\u2022";
+              bulletCellStyle =
+                `flex:0 0 1.5em;width:1.5em;text-align:center;line-height:1.1;user-select:none;` +
+                `font-size:1.85em;font-weight:700;color:rgba(0,0,0,0.82);`;
+            }
+            const listGapPx = nest <= 0 ? 5 : 7;
             const listRowWrapStyle =
-              `display:flex;align-items:flex-start;gap:6px;margin:3px 0;padding-left:${padLeft}px;` +
+              `display:flex;align-items:flex-start;gap:${listGapPx}px;margin:3px 0;padding-left:${padLeft}px;` +
               `font-weight:400;line-height:1.65;box-sizing:border-box;width:100%;min-width:0;`;
-            const bulletCellStyle =
-              `flex:0 0 ${bulletCellWidth};width:${bulletCellWidth};text-align:center;line-height:inherit;user-select:none;`;
             let bodyHtml: string;
             if (/[:：]/.test(item)) {
               bodyHtml = enhanceFormulaSegmentAfterColon(item);
@@ -2013,6 +2035,7 @@ export function registerLLMItemPaneSection() {
           }
           const quote = line.match(/^\s*>\s?(.*)$/);
           if (quote) {
+            mdUlNest0Serial = 0;
             out.push(
               `<div style="margin:4px 0; padding-left:8px; border-left:2px solid rgba(127,127,127,0.35); opacity:0.9; font-weight:400;">${renderInlineMarkdownLite(
                 quote[1],
@@ -2024,11 +2047,13 @@ export function registerLLMItemPaneSection() {
             out.push("<div style=\"height:6px;\"></div>");
             continue;
           }
+          mdUlNest0Serial = 0;
           out.push(
             `<div style="font-weight:400; line-height:1.65; margin:2px 0;">${renderInlineMarkdownLite(line)}</div>`,
           );
         }
         if (inMathBlock && mathLines.length) {
+          mdUlNest0Serial = 0;
           out.push(formatFormulaBlock(mathLines.join("\n")));
         }
         if (inCode) {
@@ -2229,12 +2254,15 @@ export function registerLLMItemPaneSection() {
         let normalized = String(text || "");
         // 去除后端注入的条目上下文标记。
         normalized = normalized.replace(/^\[zotero_current_item_id=\d+\]\s*\n?/m, "");
-        // 去除前端附加给后端的当前文献路径标记。
-        normalized = normalized.replace(/^\[zotero_current_wiki_pdf_path=.*?\]\s*\n?/m, "");
+        // 去除前端附加给后端的当前文献路径标记（任意行首出现）。
+        normalized = normalized.replace(/^\[zotero_current_wiki_pdf_path=.*?\]\s*\n?/gm, "");
         // 去除仅用于检索的 RAG 注入块，避免恢复历史时污染用户可读内容。
         normalized = normalized.replace(/\[RAG Context\][\s\S]*?\[\/RAG Context\]\s*\n*/g, "");
         // 去除可能残留的文本上下文包裹标签，仅保留用户输入主问题。
         normalized = normalized.replace(/\[Text Context\][\s\S]*?\[\/Text Context\]\s*\n*/g, "");
+        // 去除 bridge 在 RAG 后追加的「再确认 / 请直接回答」整段（旧会话里可能已写入 jsonl）。
+        normalized = normalized.replace(/\n----\n【RAG 再确认】[^\n]*(\n|$)/g, "");
+        normalized = normalized.replace(/\n----\n【请直接回答此问（优先于旧对话）】[\s\S]*$/m, "");
         return normalized.trim();
       }
 

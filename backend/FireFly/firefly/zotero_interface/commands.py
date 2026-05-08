@@ -964,7 +964,7 @@ def agent(
 
     async def _on_llm_request_display(payload: dict[str, Any]) -> None:
         """展示发给 LLM 的快照；任意异常不得阻断推理。"""
-        title = "LLM 请求快照（默认整段脱敏；可在 cli.json 的 llm_input_print 中分段打印）"
+        title = "LLM 请求快照（默认整段脱敏；可在 user.json 的 llm_input_print 中分段打印）"
         try:
             body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         except Exception as exc:
@@ -1146,17 +1146,67 @@ def agent(
                 return str(m.group(1)).strip() if m else ""
 
             def _resolve_rag_path_from_pdf_marker(pdf_path: str) -> Path | None:
+                """根据插件发来的 wiki PDF 镜像路径，解析同结构的 raw/rag/*.jsonl。"""
                 if not pdf_path:
                     return None
-                text = str(pdf_path)
-                lowered = text.lower().replace("\\", "/")
+                raw = str(pdf_path).strip().strip('"')
+                norm = raw.replace("\\", "/")
+                lowered = norm.lower()
                 marker = "raw/pdf/"
                 idx = lowered.find(marker)
                 if idx < 0:
                     return None
-                head = text[:idx]
-                tail = text[idx + len(marker) :]
-                return (Path(f"{head}raw/rag") / tail).with_suffix(".jsonl")
+                head = norm[:idx].rstrip("/")
+                tail = norm[idx + len(marker) :].lstrip("/")
+                if not tail:
+                    return None
+                tail_parts = [p for p in tail.split("/") if p]
+                primary = Path(head)
+                for part in ("raw", "rag", *tail_parts):
+                    primary = primary / part
+                primary = primary.with_suffix(".jsonl")
+                try:
+                    if primary.is_file():
+                        return primary.resolve()
+                except Exception:
+                    if primary.is_file():
+                        return primary
+
+                stem = Path(tail_parts[-1]).stem
+                rag_root = Path(head) / "raw" / "rag"
+                try:
+                    if rag_root.is_dir():
+                        matches = list(rag_root.rglob(f"{stem}.jsonl"))
+                        if len(matches) == 1:
+                            logger.info(
+                                "RAG jsonl resolved via basename fallback: {} -> {}",
+                                pdf_path,
+                                matches[0],
+                            )
+                            return matches[0].resolve()
+                        if len(matches) > 1:
+                            logger.warning(
+                                "Multiple RAG jsonl for stem {!r} under {}, skipping ambiguous fallback",
+                                stem,
+                                rag_root,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "RAG basename fallback failed for {!r}: {}",
+                        pdf_path,
+                        exc,
+                    )
+
+                try:
+                    exists = primary.exists()
+                except Exception:
+                    exists = False
+                if not exists:
+                    logger.warning(
+                        "RAG jsonl not found for wiki pdf marker (primary {!r})",
+                        primary,
+                    )
+                return primary if exists else None
 
             def _resolve_markdown_root_from_rag_path(rag_path: Path) -> Path | None:
                 text = str(rag_path)
@@ -1213,14 +1263,13 @@ def agent(
                 text = str(content).strip()
                 if not text:
                     return False
-                lowered = text.lower()
                 # 移除 marker 后再做语义判断，避免 marker 本身干扰。
-                lowered = re.sub(r"\[zotero_current_[^\]]+\]", " ", lowered)
-                lowered = re.sub(r"\s+", " ", lowered).strip()
-                if not lowered:
+                lowered_naked = re.sub(r"\[zotero_current_[^\]]+\]", " ", text.lower())
+                lowered_naked = re.sub(r"\s+", " ", lowered_naked).strip()
+                if not lowered_naked:
                     return False
 
-                # 明确无关的常见闲聊短句，直接不触发。
+                # 明确无关的常见闲聊短句，直接不触发（即便带了 wiki pdf marker）。
                 off_topic_phrases = (
                     "你好",
                     "hi",
@@ -1236,8 +1285,14 @@ def agent(
                     "今天几号",
                     "几点了",
                 )
-                if len(lowered) <= 32 and any(p in lowered for p in off_topic_phrases):
+                if len(lowered_naked) <= 32 and any(p in lowered_naked for p in off_topic_phrases):
                     return False
+
+                # 插件已写入当前文献路径时默认检索；否则「分析 4.2 节」「推导公式」等短技术问无法命中下方关键词。
+                if re.search(r"\[zotero_current_wiki_pdf_path=", text):
+                    return True
+
+                lowered = lowered_naked
 
                 literature_keywords = (
                     "论文",
@@ -1278,7 +1333,7 @@ def agent(
                 )
                 return any(re.search(pat, lowered) for pat in reference_patterns)
 
-            def _retrieve_local_rag_chunks(query: str, rag_jsonl_path: Path, top_k: int = 6) -> list[dict[str, Any]]:
+            def _retrieve_local_rag_chunks(query: str, rag_jsonl_path: Path, top_k: int = 12) -> list[dict[str, Any]]:
                 return retrieve_rag_chunks_with_chapter_expansion(query, rag_jsonl_path, top_k=top_k)
 
             def _inject_rag_context(content: str) -> str:
@@ -1301,6 +1356,7 @@ def agent(
                     "[RAG Context]",
                     f"source: {rag_path}",
                     "以下片段来自当前打开文献的本地 RAG 检索（章节名优先匹配；若匹配到子章节如 4.3，则召回整个父章节 4；按 chunk_index 文档顺序排列）：",
+                    "作答约束：回答用户问题时必须以上述片段为主要依据。若用户点名章节号（如 4.2、第三节），优先采信各行「section=[…]」与该节匹配的片段中的实验设定、指标与结论；不要用摘要/引言里的泛泛概括代替该节正文。若片段中确实没有相关信息，请写明依据不足，勿编造实验细节。",
                     "重要：RAG 识别出的公式、符号、上下标可能存在 OCR/解析误差。请先校正并优化公式表达，再给出答案，不要逐字照搬原片段。",
                     "公式输出格式要求：请优先使用标准 LaTeX；独立公式单独成行并使用 $$...$$，行内公式使用 $...$；变量下标/上标请使用规范写法（如 f_{g,l}, p_{opt}）。",
                 ]
@@ -1313,8 +1369,18 @@ def agent(
                     section_info = f" section=[{section_path}]" if section_path else ""
                     block_lines.append(f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}{section_info}) ---")
                     block_lines.append(txt)
+                block_lines.append(
+                    "— 以上即本轮注入的检索材料。回答下面用户消息时，须与上述各 chunk 的 section 与正文逐条对照；"
+                    "禁止用「本文/作者提出/仿真实验表明…」等不限定出处的全文式套话，除非检索片段中确有相同表述。 —"
+                )
                 block_lines.append("[/RAG Context]")
-                return f"{chr(10).join(block_lines)}\n\n{content}"
+                assembled = f"{chr(10).join(block_lines)}\n\n{content}"
+                return (
+                    f"{assembled}\n\n"
+                    "----\n"
+                    "【RAG 再确认】生成回复前请再次查阅紧邻上方的 [RAG Context]；"
+                    "凡涉及文献事实与实验结论，只能据此片段陈述；片段未出现的信息须写明「检索片段未提及」，勿凭常识杜撰。"
+                )
 
             def _cache_zotero_media(media_paths: list[str]) -> list[str]:
                 """把前端传来的图片缓存到 workspace/temp，返回可读路径列表。"""
@@ -1534,40 +1600,19 @@ def agent(
                     except Exception:
                         rag_resolved = rag_path.expanduser()
                     had_prior_rag_index = rag_resolved.is_file()
-                    script_path = (
-                        Path(__file__).resolve().parents[1]
-                        / "skills"
-                        / "markdown"
-                        / "scripts"
-                        / "markdown_to_rag.py"
-                    )
-                    if not script_path.is_file():
-                        raise FileNotFoundError(f"markdown_to_rag script not found: {script_path}")
-                    proc = await asyncio.create_subprocess_exec(
-                        sys.executable,
-                        str(script_path),
-                        "--markdown",
-                        str(md),
-                        "--rag",
-                        str(rag_resolved),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout_b, stderr_b = await proc.communicate()
-                    stdout = stdout_b.decode("utf-8", errors="replace")
-                    stderr = stderr_b.decode("utf-8", errors="replace")
-                    if proc.returncode != 0:
-                        raise RuntimeError(
-                            f"rag index failed (code={proc.returncode}): {stderr or stdout}".strip()
-                        )
-                    chunk_count = 0
-                    try:
-                        payload = json.loads(stdout.strip() or "{}")
-                        inner = payload.get("result")
-                        if isinstance(inner, dict):
-                            chunk_count = int(inner.get("chunk_count") or 0)
-                    except Exception:
-                        chunk_count = 0
+                    # 进程内调用切片逻辑，与当前 firefly 包版本一致（避免子进程读到另一套安装路径下的旧脚本）。
+                    from firefly.config.cli_prefs import get_markdown_rag_prefs
+                    from firefly.config.loader import get_config_path as _cfg_path_for_rag
+                    from firefly.skills.markdown.scripts.markdown_to_rag import convert_one as _md_to_rag
+
+                    _mr = get_markdown_rag_prefs(_cfg_path_for_rag())
+                    _max_c = max(200, int(_mr["max_chars"]))
+
+                    def _run_slice() -> dict[str, object]:
+                        return _md_to_rag(md, rag_resolved, _max_c)
+
+                    conv = await asyncio.to_thread(_run_slice)
+                    chunk_count = int(conv.get("chunk_count") or 0)
                     return {
                         "rag_path": str(rag_resolved),
                         "rag_chunk_count": chunk_count,
@@ -1575,8 +1620,14 @@ def agent(
                         "had_prior_rag_index": had_prior_rag_index,
                     }
 
-                async def _ensure_pdf_converted(pdf_path: Path, markdown_path: Path) -> dict[str, Any]:
-                    if markdown_path.is_file():
+                async def _ensure_pdf_converted(
+                    pdf_path: Path,
+                    markdown_path: Path,
+                    *,
+                    force_markdown: bool = False,
+                ) -> dict[str, Any]:
+                    had_markdown = markdown_path.is_file()
+                    if not force_markdown and had_markdown:
                         return {
                             "converted": False,
                             "reason": "already_converted",
@@ -1592,13 +1643,19 @@ def agent(
                     if not script_path.is_file():
                         raise FileNotFoundError(f"converter script not found: {script_path}")
 
-                    proc = await asyncio.create_subprocess_exec(
+                    cmd: list[str | Path] = [
                         sys.executable,
                         str(script_path),
                         "--pdf",
                         str(pdf_path),
                         "--markdown",
                         str(markdown_path),
+                    ]
+                    if force_markdown:
+                        cmd.append("--overwrite")
+
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
@@ -1612,6 +1669,9 @@ def agent(
                     return {
                         "converted": True,
                         "stdout": stdout.strip(),
+                        "reason": "markdown_regenerated"
+                        if (force_markdown and had_markdown)
+                        else "converted",
                     }
 
                 async def _pdf_opened(request: web.Request) -> web.Response:
@@ -1647,9 +1707,18 @@ def agent(
                         markdown_path = markdown_path.expanduser().resolve()
                     except Exception:
                         markdown_path = markdown_path.expanduser()
-                    # 每次点击一键转换均重建 RAG（覆盖 jsonl）；与 PDF/Markdown 是否新生成无关。
+                    # force_markdown：即使已有 .md 也从 PDF 重转（传 pdf_to_markdown --overwrite）。
+                    # 未指定时保持旧行为：有 md 则跳过 PDF，仅重建 RAG。
+                    raw_body = body or {}
+                    force_markdown = bool(
+                        raw_body.get("force_markdown") or raw_body.get("forceMarkdown")
+                    )
                     try:
-                        result = await _ensure_pdf_converted(pdf_path, markdown_path)
+                        result = await _ensure_pdf_converted(
+                            pdf_path,
+                            markdown_path,
+                            force_markdown=force_markdown,
+                        )
                     except Exception as exc:
                         return web.json_response(
                             {
