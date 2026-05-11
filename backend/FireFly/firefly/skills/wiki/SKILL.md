@@ -1,11 +1,19 @@
 ---
 name: wiki
-description: 将 llm-wiki 的 PDF 批量转换为 Markdown，并保持与 PDF 目录一致。
+description: 将 llm-wiki 的 PDF 批量转换为 Markdown，并保持与 PDF 目录一致；维护 wiki 正文与合成页时以 AGENTS.md 为唯一流程入口。
 metadata: {"firefly":{"emoji":"🧾"}}
 version: 1.0.0
 ---
 
 # Wiki PDF/Markdown 处理
+
+## 写入 wiki（必读）
+
+凡创建或更新 **`llm-wiki/wiki/`**（含与 `raw/markdown/` 镜像的单篇页）、**`wiki/_synthesis/`**，或依据检索在对话中沉淀结论时：
+
+1. **先阅读并遵守** 仓库内 **`backend/llm-wiki/AGENTS.md`**（与工作区旁解析到的 `llm-wiki/AGENTS.md` 为同一份规范）。其中约定 raw/wiki 边界、镜像路径、`_synthesis` 与单篇关系、引用 `raw/markdown/...`（及文内图片相对路径）、禁止编造、查询与 Ingest 顺序等。
+2. 单篇文献页面分区模板：**`backend/llm-wiki/wiki/_templates/paper.md`**。
+3. **事实层**以 `raw/markdown/` 与各篇关联图片为准。Zotero 侧「通过本论文 Markdown 整理 wiki」按钮调用 **`POST /zotero/wiki-ingest-markdown`**（请求体与 `convert-markdown` 相同），由当前模型依据 `AGENTS.md` 生成/覆盖镜像的 `wiki/**/*.md`。Agent 手写编辑 wiki 前仍须自行 **`read_file`** `AGENTS.md` 再动笔。
 
 当用户提出“把 `llm-wiki/raw/pdf` 转成 markdown”“批量转 PDF”“把 markdown 切片成 rag”这类请求时，优先使用本技能。
 

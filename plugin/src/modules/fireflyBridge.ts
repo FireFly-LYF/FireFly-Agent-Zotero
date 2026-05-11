@@ -9,6 +9,10 @@ const BRIDGE_CANCEL_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/cancel`;
 const BRIDGE_SESSION_CLEAR_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/session/clear`;
 const BRIDGE_PDF_OPENED_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/pdf-opened`;
 const BRIDGE_CONVERT_MARKDOWN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/convert-markdown`;
+const BRIDGE_WIKI_INGEST_MARKDOWN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/wiki-ingest-markdown`;
+const BRIDGE_DELETE_TURN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/session/delete-turn`;
+
+const WIKI_INGEST_MARKDOWN_TIMEOUT_MS = 600_000;
 
 const HEALTH_RETRY = 40;
 const HEALTH_INTERVAL_MS = 500;
@@ -115,6 +119,44 @@ export async function ensureFireFlyBridgeStarted(): Promise<void> {
   );
 }
 
+export async function deleteZoteroConversationTurn(
+  sessionID: string,
+  assistantMessageIndex: number,
+): Promise<{ ok: boolean; detail?: string }> {
+  const body = JSON.stringify({
+    session_id: sessionID,
+    assistant_message_index: assistantMessageIndex,
+  });
+  try {
+    const resp = await zoteroHttpRequest("POST", BRIDGE_DELETE_TURN_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: SEND_TIMEOUT_MS,
+    });
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`Bridge delete-turn failed: ${resp.status} ${resp.responseText}`);
+    }
+    const data = JSON.parse(resp.responseText || "{}") as unknown as { ok?: boolean; detail?: string };
+    return { ok: Boolean(data.ok), detail: data.detail != null ? String(data.detail) : undefined };
+  } catch (_e1) {
+    const res = await fetchWithTimeout(
+      BRIDGE_DELETE_TURN_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+      SEND_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Bridge delete-turn failed: ${res.status} ${text}`);
+    }
+    const data = (await res.json()) as unknown as { ok?: boolean; detail?: string };
+    return { ok: Boolean(data.ok), detail: data.detail != null ? String(data.detail) : undefined };
+  }
+}
+
 export async function sendToFireFly(message: string, sessionID = "cli:direct") {
   const body = JSON.stringify({
     message,
@@ -151,7 +193,6 @@ export async function sendToFireFly(message: string, sessionID = "cli:direct") {
 export async function streamFromFireFly(
   message: string,
   sessionID: string,
-  thinkingState: "Enable" | "Disable",
   mediaPaths: string[] = [],
   onDelta: (delta: string) => void,
   onFinal?: (content: string) => void,
@@ -162,7 +203,6 @@ export async function streamFromFireFly(
   const payload: Record<string, unknown> = {
     message,
     session_id: sessionID,
-    thinking_state: thinkingState,
     media: Array.isArray(mediaPaths) ? mediaPaths : [],
   };
   const lit = String(literatureTitle || "").trim();
@@ -228,21 +268,21 @@ export async function streamFromFireFly(
   }
 }
 
-export const fetchZoteroChatHistories = async (sessionID?: string): Promise<
-  Record<
-    string,
-    Array<{ role: string; content: string; reasoning_content?: string; literature_title?: string }>
-  >
-> => {
+export type ZoteroHistoryRow = {
+  role: string;
+  content: string;
+  reasoning_content?: string;
+  literature_title?: string;
+  session_message_index?: number;
+  /** ISO-like string from session JSONL ``timestamp`` */
+  timestamp?: string;
+};
+
+export const fetchZoteroChatHistories = async (sessionID?: string): Promise<Record<string, ZoteroHistoryRow[]>> => {
   const query = sessionID ? `?session_id=${encodeURIComponent(sessionID)}` : "";
   const url = `${BRIDGE_HISTORY_URL}${query}`;
   const tryParse = (raw: string) => {
-    const parsed = JSON.parse(raw || "{}") as {
-      sessions?: Record<
-        string,
-        Array<{ role: string; content: string; reasoning_content?: string; literature_title?: string }>
-      >;
-    };
+    const parsed = JSON.parse(raw || "{}") as { sessions?: Record<string, ZoteroHistoryRow[]> };
     return parsed.sessions ?? {};
   };
   try {
@@ -257,12 +297,7 @@ export const fetchZoteroChatHistories = async (sessionID?: string): Promise<
       const text = await res.text();
       throw new Error(`Bridge history failed: ${res.status} ${text}`);
     }
-    const parsed = (await res.json()) as {
-      sessions?: Record<
-        string,
-        Array<{ role: string; content: string; reasoning_content?: string; literature_title?: string }>
-      >;
-    };
+    const parsed = (await res.json()) as { sessions?: Record<string, ZoteroHistoryRow[]> };
     return parsed.sessions ?? {};
   }
 };
@@ -419,6 +454,69 @@ export async function notifyZoteroPdfOpened(payload: {
       throw new Error(`Bridge pdf-opened failed: ${res.status} ${text}`);
     }
     return res.json();
+  }
+}
+
+export type WikiIngestMarkdownResult = {
+  ok: boolean;
+  detail: string;
+  markdown_path?: string | null;
+  wiki_path?: string | null;
+  source_truncated?: boolean;
+};
+
+/** 根据当前文献在 raw/markdown 下的 .md，调用 FireFly LLM 生成/覆盖镜像 wiki 页（与 convert 相同 pdf 字段）。 */
+export async function triggerWikiIngestFromMarkdown(payload: {
+  pdf_path?: string;
+  pdf_dir?: string;
+  pdf_name?: string;
+  wiki_pdf_path?: string;
+}): Promise<WikiIngestMarkdownResult> {
+  const body = JSON.stringify({
+    pdf_path: String(payload.pdf_path || "").trim(),
+    pdf_dir: String(payload.pdf_dir || "").trim(),
+    pdf_name: String(payload.pdf_name || "").trim(),
+    wiki_pdf_path: String(payload.wiki_pdf_path || "").trim(),
+  });
+  try {
+    const resp = await zoteroHttpRequest("POST", BRIDGE_WIKI_INGEST_MARKDOWN_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: WIKI_INGEST_MARKDOWN_TIMEOUT_MS,
+    });
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`Bridge wiki-ingest failed: ${resp.status} ${resp.responseText}`);
+    }
+    const data = JSON.parse(resp.responseText || "{}") as unknown as WikiIngestMarkdownResult;
+    return {
+      ok: Boolean(data.ok),
+      detail: String(data.detail || ""),
+      markdown_path: data.markdown_path != null ? String(data.markdown_path) : null,
+      wiki_path: data.wiki_path != null ? String(data.wiki_path) : null,
+      source_truncated: Boolean(data.source_truncated),
+    };
+  } catch (_e1) {
+    const res = await fetchWithTimeout(
+      BRIDGE_WIKI_INGEST_MARKDOWN_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+      WIKI_INGEST_MARKDOWN_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Wiki ingest failed: ${res.status} ${text}`);
+    }
+    const data = (await res.json()) as unknown as WikiIngestMarkdownResult;
+    return {
+      ok: Boolean(data.ok),
+      detail: String(data.detail || ""),
+      markdown_path: data.markdown_path != null ? String(data.markdown_path) : null,
+      wiki_path: data.wiki_path != null ? String(data.wiki_path) : null,
+      source_truncated: Boolean(data.source_truncated),
+    };
   }
 }
 

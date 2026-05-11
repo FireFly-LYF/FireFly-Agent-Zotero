@@ -38,6 +38,7 @@ from rich.text import Text
 
 from firefly import __logo__, __version__
 from firefly.skills.markdown.scripts.rag_utils import retrieve_rag_chunks_with_chapter_expansion
+from firefly.skills.wiki.scripts.llm_wiki_paths import resolve_wiki_mirror_from_raw_pdf_path
 
 
 class SafeFileHistory(FileHistory):
@@ -1336,6 +1337,50 @@ def agent(
             def _retrieve_local_rag_chunks(query: str, rag_jsonl_path: Path, top_k: int = 12) -> list[dict[str, Any]]:
                 return retrieve_rag_chunks_with_chapter_expansion(query, rag_jsonl_path, top_k=top_k)
 
+            _MAX_WIKI_CONTEXT_CHARS = 32000
+
+            def _inject_wiki_page_context(content: str) -> str:
+                """若当前文献已有镜像 wiki 页，将其插在条目提示之后、RAG 检索片段之前。"""
+                if not content or "[Wiki Page Context]" in content:
+                    return content
+                pdf_path = _extract_current_wiki_pdf_path(content)
+                if not pdf_path:
+                    return content
+                resolved = resolve_wiki_mirror_from_raw_pdf_path(pdf_path)
+                if not resolved:
+                    return content
+                wiki_root, wiki_path = resolved
+                try:
+                    wiki_resolved = wiki_path.expanduser().resolve()
+                except OSError:
+                    wiki_resolved = wiki_path.expanduser()
+                if not wiki_resolved.is_file():
+                    return content
+                try:
+                    body = wiki_resolved.read_text(encoding="utf-8", errors="replace")
+                except OSError as e:
+                    logger.warning("wiki context: cannot read {} ({})", wiki_resolved, e)
+                    return content
+                truncated = False
+                if len(body) > _MAX_WIKI_CONTEXT_CHARS:
+                    body = body[:_MAX_WIKI_CONTEXT_CHARS] + "\n\n…（正文过长已截断）\n"
+                    truncated = True
+                try:
+                    wr = wiki_root.expanduser().resolve()
+                    rel_display = wiki_resolved.relative_to(wr).as_posix()
+                except Exception:
+                    rel_display = str(wiki_resolved)
+                block_lines = [
+                    "[Wiki Page Context]",
+                    "该条目在 llm-wiki 下已有整理页（与 raw/markdown 目录镜像；规范见 AGENTS.md）。"
+                    "可作主题结构与要点导航；具体数值与实验细节请与下方 RAG 片段或原文核对。",
+                    f"path（相对 llm-wiki 根）: {rel_display}",
+                ]
+                if truncated:
+                    block_lines.append("（正文已按长度上限截断）")
+                block_lines.extend(["---", body.rstrip(), "[/Wiki Page Context]"])
+                return f"{chr(10).join(block_lines)}\n\n{content}"
+
             def _inject_rag_context(content: str) -> str:
                 if not content:
                     return content
@@ -1359,6 +1404,8 @@ def agent(
                     "作答约束：回答用户问题时必须以上述片段为主要依据。若用户点名章节号（如 4.2、第三节），优先采信各行「section=[…]」与该节匹配的片段中的实验设定、指标与结论；不要用摘要/引言里的泛泛概括代替该节正文。若片段中确实没有相关信息，请写明依据不足，勿编造实验细节。",
                     "重要：RAG 识别出的公式、符号、上下标可能存在 OCR/解析误差。请先校正并优化公式表达，再给出答案，不要逐字照搬原片段。",
                     "公式输出格式要求：请优先使用标准 LaTeX；独立公式单独成行并使用 $$...$$，行内公式使用 $...$；变量下标/上标请使用规范写法（如 f_{g,l}, p_{opt}）。",
+                    "用户可见回答中禁止出现 RAG 内部编号式套话，例如「从 chunk 1」「从第 N 个片段的…部分可知」「从 chunk 1 的“算法性能比较”部分可知」等；"
+                    "用自然语言直接陈述结论与依据（必要时用章节/小节主题指代），不要提 chunk、片段序号或引号内小节名作为机械出处标签。",
                 ]
                 for i, rec in enumerate(chunks, start=1):
                     txt = str(rec.get("text", "") or "").strip()
@@ -1380,6 +1427,7 @@ def agent(
                     "----\n"
                     "【RAG 再确认】生成回复前请再次查阅紧邻上方的 [RAG Context]；"
                     "凡涉及文献事实与实验结论，只能据此片段陈述；片段未出现的信息须写明「检索片段未提及」，勿凭常识杜撰。"
+                    "勿在面向用户的正文中写「从 chunk …」「从第几个片段…可知」等暴露检索结构的句子。"
                 )
 
             def _cache_zotero_media(media_paths: list[str]) -> list[str]:
@@ -1424,10 +1472,10 @@ def agent(
                     await q.put(payload)
 
             async def _start_zotero_bridge():
-                def _serialize_session_messages(session_key: str) -> list[dict[str, str]]:
+                def _serialize_session_messages(session_key: str) -> list[dict[str, Any]]:
                     session = agent_loop.sessions.get_or_create(session_key)
-                    out: list[dict[str, str]] = []
-                    for msg in session.messages:
+                    out: list[dict[str, Any]] = []
+                    for idx, msg in enumerate(session.messages):
                         role = str(msg.get("role", ""))
                         if role not in {"user", "assistant"}:
                             continue
@@ -1435,13 +1483,17 @@ def agent(
                         reasoning = str(msg.get("reasoning_content", "") or "")
                         lit = msg.get("literature_title")
                         lit_s = str(lit).strip() if lit is not None else ""
-                        row: dict[str, str] = {
+                        row: dict[str, Any] = {
                             "role": role,
                             "content": content,
                             "reasoning_content": reasoning,
+                            "session_message_index": idx,
                         }
                         if lit_s:
                             row["literature_title"] = lit_s
+                        ts = msg.get("timestamp")
+                        if ts is not None:
+                            row["timestamp"] = str(ts)
                         out.append(row)
                     return out
 
@@ -1771,6 +1823,7 @@ def agent(
                     media_paths = [str(p).strip() for p in media_paths if str(p).strip()]
                     cached_media = _cache_zotero_media(media_paths)
                     patched = _inject_zotero_item_context(content, override or session_id)
+                    patched = _inject_wiki_page_context(patched)
                     patched = _inject_rag_context(patched)
                     patched = _zotero_append_query_reminder(patched, content)
                     lit = _literature_title_from_bridge_body(body)
@@ -1791,8 +1844,6 @@ def agent(
                     content = str((body or {}).get("message", "")).strip()
                     if not content:
                         return web.json_response({"ok": False, "error": "message is required"}, status=400)
-                    raw_thinking_state = str((body or {}).get("thinking_state", "Enable")).strip().lower()
-                    thinking_state = "Disable" if raw_thinking_state == "disable" else "Enable"
                     media_paths = (body or {}).get("media")
                     if not isinstance(media_paths, list):
                         media_paths = []
@@ -1805,6 +1856,7 @@ def agent(
                     else:
                         current_channel, current_chat_id = "cli", source_session
                     patched_content = _inject_zotero_item_context(content, source_session)
+                    patched_content = _inject_wiki_page_context(patched_content)
                     patched_content = _inject_rag_context(patched_content)
                     patched_content = _zotero_append_query_reminder(patched_content, content)
                     stream_lit = _literature_title_from_bridge_body(body)
@@ -1828,7 +1880,6 @@ def agent(
                     stream_meta: dict[str, Any] = {
                         "_wants_stream": True,
                         "_source": "zotero_stream",
-                        "_thinking_state": thinking_state,
                     }
                     if stream_lit:
                         stream_meta["literature_title"] = stream_lit
@@ -1918,12 +1969,79 @@ def agent(
                     agent_loop.sessions.save(sess)
                     return web.json_response({"ok": True, "session_id": target_key})
 
+                async def _wiki_ingest_from_markdown(request: web.Request) -> web.Response:
+                    """Build ``wiki/<mirror>.md`` from the current item's ``raw/markdown`` file (same payload as convert)."""
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        body = {}
+                    pdf_path = _pick_source_pdf_for_conversion(body or {})
+                    if pdf_path is None:
+                        return web.json_response(
+                            {
+                                "ok": False,
+                                "detail": "no_pdf",
+                                "markdown_path": None,
+                                "wiki_path": None,
+                            },
+                        )
+                    markdown_path = _markdown_output_path(body or {}, pdf_path)
+                    try:
+                        markdown_path = markdown_path.expanduser().resolve()
+                    except Exception:
+                        markdown_path = markdown_path.expanduser()
+                    if not markdown_path.is_file():
+                        return web.json_response(
+                            {
+                                "ok": False,
+                                "detail": "markdown_missing",
+                                "markdown_path": str(markdown_path),
+                                "wiki_path": None,
+                            },
+                        )
+                    from firefly.skills.wiki.scripts.wiki_markdown_ingest import (
+                        run_wiki_ingest_from_markdown,
+                    )
+
+                    result = await run_wiki_ingest_from_markdown(agent_loop, markdown_path)
+                    return web.json_response(result)
+
+                async def _delete_session_turn(request: web.Request) -> web.Response:
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        body = {}
+                    raw_sid = str((body or {}).get("session_id", "")).strip() or session_id
+                    if not str(raw_sid).strip():
+                        return web.json_response(
+                            {"ok": False, "detail": "session_id is required"},
+                            status=400,
+                        )
+                    try:
+                        assistant_index = int((body or {}).get("assistant_message_index", -1))
+                    except (TypeError, ValueError):
+                        return web.json_response(
+                            {"ok": False, "detail": "assistant_message_index must be an integer"},
+                            status=400,
+                        )
+                    target_key = _resolve_zotero_chat_session_key(raw_sid)
+                    sess = agent_loop.sessions.get_or_create(target_key)
+                    if not sess.delete_turn_containing_assistant_at(assistant_index):
+                        return web.json_response(
+                            {"ok": False, "detail": "invalid_assistant_message_index"},
+                            status=400,
+                        )
+                    agent_loop.sessions.save(sess)
+                    return web.json_response({"ok": True, "detail": "deleted"})
+
                 app = web.Application()
                 app.router.add_get("/health", _health)
                 app.router.add_get("/zotero/meta", _meta)
                 app.router.add_get("/zotero/history", _history)
                 app.router.add_post("/zotero/message", _ingest)
                 app.router.add_post("/zotero/stream", _stream_chat)
+                app.router.add_post("/zotero/wiki-ingest-markdown", _wiki_ingest_from_markdown)
+                app.router.add_post("/zotero/session/delete-turn", _delete_session_turn)
                 app.router.add_post("/zotero/cancel", _cancel_chat)
                 app.router.add_post("/zotero/session/clear", _clear_session)
                 app.router.add_post("/zotero/pdf-opened", _pdf_opened)
@@ -1941,7 +2059,6 @@ def agent(
             )
             console.print(
                 "[dim]POST JSON: {\"message\": \"...\", \"session_id\": \"optional\", "
-                "\"thinking_state\": \"Enable\"|\"Disable\", "
                 "\"literature_title\": \"optional (Zotero 当前文献)\"}[/dim]",
             )
 
@@ -2075,6 +2192,7 @@ def agent(
                         else:
                             current_channel, current_chat_id = "cli", source_session
                         patched_command = _inject_zotero_item_context(command, source_session)
+                        patched_command = _inject_wiki_page_context(patched_command)
                         patched_command = _inject_rag_context(patched_command)
                         patched_command = _zotero_append_query_reminder(patched_command, command)
 

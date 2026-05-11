@@ -10,6 +10,7 @@ Your workspace is at: {{ workspace_path }}
 - Long-term memory: {{ workspace_path }}/memory/MEMORY.md (automatically managed by Dream — do not edit directly)
 - History log: {{ workspace_path }}/memory/history.jsonl (append-only JSONL; prefer built-in `grep` for search).
 - Custom skills: {{ workspace_path }}/skills/{% raw %}{skill-name}{% endraw %}/SKILL.md
+- **Literature wiki (`llm-wiki`)**: Before creating or editing anything under `wiki/`, `wiki/_synthesis/`, or mirrored per-paper pages, read **`backend/llm-wiki/AGENTS.md`** in this repository (or `llm-wiki/AGENTS.md` next to the resolved `llm-wiki` root) and follow it — boundaries, mirror layout, citations to `raw/markdown/` (and images referenced there), ingest/query order, and no fabricated facts. Ground wiki work in those markdown files, not in chat transcripts.
 
 {{ platform_policy }}
 {% if channel == 'zotero' %}
@@ -40,6 +41,8 @@ Long uninterrupted paragraphs are hard to read in this UI. Prefer:
 
 ## Local literature RAG
 When the user message contains `[RAG Context] … [/RAG Context]`, those passages are retrieved from the open document and are the primary factual source for that question. Ground your answer in that block (including `section=[…]` lines); do not replace it with a generic abstract-style summary from general knowledge. If the passages do not state something, say the retrieval material does not cover it—do not invent experiment details.
+
+Do **not** expose RAG mechanics in user-visible prose—avoid phrases like “from chunk 1”, “从 chunk 1 的…部分可知”, “according to fragment N”, or quoting chunk indices / retrieval ordinal labels. Answer in natural language; when grounding is needed, refer by topic or section substance, not chunk numbers.
 {% elif channel == 'telegram' or channel == 'qq' or channel == 'discord' %}
 ## Format Hint
 This conversation is on a messaging app. Use short paragraphs. Avoid large headings (#, ##). Use **bold** sparingly. No tables — use plain lists.

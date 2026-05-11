@@ -81,7 +81,6 @@ class _LoopHook(AgentHook):
         on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         *,
-        thinking_state: str = "Enable",
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
@@ -96,8 +95,6 @@ class _LoopHook(AgentHook):
         self._chat_id = chat_id
         self._message_id = message_id
         self._stream_buf = ""
-        normalized = thinking_state.strip().lower()
-        self._thinking_state = normalized if normalized in {"enable", "disable"} else "enable"
 
     def wants_streaming(self) -> bool:
         return self._on_stream is not None
@@ -122,17 +119,8 @@ class _LoopHook(AgentHook):
         return "\n\n".join(parts).strip()
 
     async def on_stream(self, context: AgentHookContext, delta: str) -> None:
-        from firefly.utils.helpers import strip_think
-
-        if self._thinking_state == "enable":
-            # Enable: 保持真正流式输出（包括 thinking/answer）。
-            incremental = delta
-            self._stream_buf += delta
-        else:
-            prev_clean = strip_think(self._stream_buf)
-            self._stream_buf += delta
-            new_clean = strip_think(self._stream_buf)
-            incremental = new_clean[len(prev_clean) :]
+        incremental = delta
+        self._stream_buf += delta
         if incremental and self._on_stream:
             await self._on_stream(incremental)
 
@@ -142,8 +130,6 @@ class _LoopHook(AgentHook):
         self._stream_buf = ""
 
     async def on_reasoning_stream(self, delta: str) -> None:
-        if self._thinking_state != "enable":
-            return
         if delta and self._on_reasoning_stream:
             await self._on_reasoning_stream(delta)
 
@@ -172,16 +158,14 @@ class _LoopHook(AgentHook):
         )
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
-        if self._thinking_state == "enable":
-            # 流式场景保持正文实时输出，避免 final 覆盖导致“全部生成后才显示 thinking”。
-            if self._on_stream is not None:
-                return content
-            answer = content or ""
-            thinking = self._compose_thinking(context)
-            if thinking:
-                return f"<think>\n{thinking}\n</think>\n{answer}".strip()
-            return answer or None
-        return self._loop._strip_think(content)
+        # 流式场景保持正文实时输出，避免 final 覆盖导致“全部生成后才显示 thinking”。
+        if self._on_stream is not None:
+            return content
+        answer = content or ""
+        thinking = self._compose_thinking(context)
+        if thinking:
+            return f"<think>\n{thinking}\n</think>\n{answer}".strip()
+        return answer or None
 
 
 class AgentLoop:
@@ -410,8 +394,6 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
-        thinking_state: str = "Enable",
-        reasoning_effort_override: str | None = None,
         *,
         session: Session | None = None,
         channel: str = "cli",
@@ -434,7 +416,6 @@ class AgentLoop:
             on_stream=on_stream,
             on_reasoning_stream=on_reasoning_stream,
             on_stream_end=on_stream_end,
-            thinking_state=thinking_state,
             channel=channel,
             chat_id=chat_id,
             message_id=message_id,
@@ -480,7 +461,6 @@ class AgentLoop:
             model=self.model,
             max_iterations=self.max_iterations,
             max_tool_result_chars=self.max_tool_result_chars,
-            reasoning_effort=reasoning_effort_override,
             hook=hook,
             error_message="Sorry, I encountered an error calling the AI model.",
             concurrent_tools=True,
@@ -721,7 +701,10 @@ class AgentLoop:
 
             await self.consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=_llm_history_max_messages_for_channel(channel))
+            history = session.get_history(
+                max_messages=_llm_history_max_messages_for_channel(channel),
+                min_message_index=None,
+            )
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
 
             messages = self.context.build_messages(
@@ -770,7 +753,10 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(max_messages=_llm_history_max_messages_for_channel(msg.channel))
+        history = session.get_history(
+            max_messages=_llm_history_max_messages_for_channel(msg.channel),
+            min_message_index=None,
+        )
 
         initial_messages = self.context.build_messages(
             history=history,
@@ -780,12 +766,6 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-
-        thinking_state = str((msg.metadata or {}).get("_thinking_state", "Enable")).strip().lower()
-        if thinking_state not in {"enable", "disable"}:
-            thinking_state = "enable"
-        # Disable 时尽量要求模型关闭推理；若模型不支持关闭，则由前端隐藏 thinking 输出。
-        reasoning_effort_override = "" if thinking_state == "disable" else None
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -826,8 +806,6 @@ class AgentLoop:
             on_stream=on_stream,
             on_reasoning_stream=on_reasoning_stream,
             on_stream_end=on_stream_end,
-            thinking_state=thinking_state,
-            reasoning_effort_override=reasoning_effort_override,
             session=session,
             channel=msg.channel,
             chat_id=msg.chat_id,

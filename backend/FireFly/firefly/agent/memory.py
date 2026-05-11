@@ -418,7 +418,10 @@ class Consolidator:
 
     def estimate_session_prompt_tokens(self, session: Session) -> tuple[int, str]:
         """估算常规会话历史视图下的当前提示词大小。"""
-        history = session.get_history(max_messages=0)
+        history = session.get_history(
+            max_messages=0,
+            min_message_index=None,
+        )
         channel, chat_id = (session.key.split(":", 1) if ":" in session.key else (None, None))
         probe_messages = self._build_messages(
             history=history,

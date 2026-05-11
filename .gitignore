@@ -30,6 +30,14 @@ backend/llm-wiki/raw/markdown/**
 backend/llm-wiki/raw/rag/**
 !backend/llm-wiki/raw/rag/.gitkeep
 
+# llm-wiki：单篇镜像页按用户库变化，与 raw/markdown 同理不强制入库；保留模板与跨篇目录
+backend/llm-wiki/wiki/**
+!backend/llm-wiki/wiki/README.md
+!backend/llm-wiki/wiki/_templates/
+!backend/llm-wiki/wiki/_templates/**
+!backend/llm-wiki/wiki/_synthesis/
+!backend/llm-wiki/wiki/_synthesis/**
+
 # Environment & secrets
 .env
 .env.*

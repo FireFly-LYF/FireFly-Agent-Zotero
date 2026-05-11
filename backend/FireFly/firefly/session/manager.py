@@ -35,7 +35,12 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
-    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+    def get_history(
+        self,
+        max_messages: int = 500,
+        *,
+        min_message_index: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a legal tool-call boundary.
 
         ``max_messages > 0``：只取未固化段落的**最后** N 条（按条数，非按 token）。
@@ -43,8 +48,13 @@ class Session:
         ``max_messages <= 0``：**不限制条数**（取全部未固化消息）。注意 ``-0`` 在 Python
         切片中等价于从开头取，因此 ``0`` 与负数均表示“不截断条数”，由上层再按 token 做
         ``_snip_history`` 等治理。
+
+        ``min_message_index``：与 ``last_consolidated`` 取较大值作为切片起点（可选）。
         """
-        unconsolidated = self.messages[self.last_consolidated:]
+        floor = self.last_consolidated
+        if min_message_index is not None:
+            floor = max(floor, max(0, int(min_message_index)))
+        unconsolidated = self.messages[floor:]
         if max_messages and max_messages > 0:
             sliced = unconsolidated[-max_messages:]
         else:
@@ -75,6 +85,53 @@ class Session:
         self.messages = []
         self.last_consolidated = 0
         self.updated_at = datetime.now()
+
+    @staticmethod
+    def _adjust_index_after_delete(
+        index: int,
+        start: int,
+        end_exclusive: int,
+    ) -> int:
+        """Re-map a message offset after deleting ``messages[start:end_exclusive]``."""
+        removed = end_exclusive - start
+        if index <= start:
+            return index
+        if index >= end_exclusive:
+            return index - removed
+        return start
+
+    def find_turn_start_index_for_assistant(self, assistant_index: int) -> int | None:
+        """Return the index of the ``user`` message that opens the turn ending at ``assistant_index``."""
+        if assistant_index < 0 or assistant_index >= len(self.messages):
+            return None
+        if self.messages[assistant_index].get("role") != "assistant":
+            return None
+        i = assistant_index - 1
+        while i >= 0:
+            if self.messages[i].get("role") == "user":
+                return i
+            i -= 1
+        return None
+
+    def delete_turn_containing_assistant_at(self, assistant_index: int) -> bool:
+        """Remove the Q&A turn ending at ``assistant_index`` (user through assistant, inclusive of tools).
+
+        Repairs ``last_consolidated`` when present.
+        """
+        start = self.find_turn_start_index_for_assistant(assistant_index)
+        if start is None:
+            return False
+        end_exclusive = assistant_index + 1
+        if end_exclusive > len(self.messages):
+            return False
+
+        del self.messages[start:end_exclusive]
+
+        self.last_consolidated = self._adjust_index_after_delete(
+            self.last_consolidated, start, end_exclusive
+        )
+        self.updated_at = datetime.now()
+        return True
 
     def retain_recent_legal_suffix(self, max_messages: int) -> None:
         """Keep a legal recent suffix, mirroring get_history boundary rules."""

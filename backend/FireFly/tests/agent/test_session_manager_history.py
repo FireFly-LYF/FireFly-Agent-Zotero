@@ -217,3 +217,71 @@ def test_window_cuts_mid_tool_group():
     # leaving orphan tool results for split_a at the front.
     history = session.get_history(max_messages=6)
     _assert_no_orphans(history)
+
+
+def test_get_history_min_message_index_skips_prefix():
+    session = Session(key="zotero:chat-1")
+    session.messages.append({"role": "user", "content": "old"})
+    session.messages.append({"role": "assistant", "content": "a"})
+    session.messages.append({"role": "user", "content": "new"})
+    session.messages.append({"role": "assistant", "content": "b"})
+    session.metadata["_wiki_llm_context_from_index"] = 2
+    h = session.get_history(max_messages=0, min_message_index=2)
+    assert [m["content"] for m in h if m["role"] == "user"] == ["new"]
+
+
+def test_get_history_min_message_index_respects_last_consolidated():
+    session = Session(key="zotero:chat-2", last_consolidated=2)
+    session.messages.extend(
+        [
+            {"role": "user", "content": "dropped1"},
+            {"role": "assistant", "content": "d1"},
+            {"role": "user", "content": "dropped2"},
+            {"role": "assistant", "content": "d2"},
+            {"role": "user", "content": "keep"},
+            {"role": "assistant", "content": "k"},
+        ]
+    )
+    session.metadata["_wiki_llm_context_from_index"] = 4
+    h = session.get_history(max_messages=0, min_message_index=4)
+    assert [m["content"] for m in h if m["role"] == "user"] == ["keep"]
+
+
+def test_delete_turn_containing_assistant_removes_tool_chain() -> None:
+    session = Session(key="test:del-turn-tools")
+    session.messages.extend(
+        [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "1", "type": "function", "function": {"name": "x", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "1", "name": "x", "content": "t"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "keep"},
+        ]
+    )
+    assert session.delete_turn_containing_assistant_at(5) is True
+    assert len(session.messages) == 4
+    assert session.messages[-1]["content"] == "answer"
+
+
+def test_delete_turn_adjusts_last_consolidated() -> None:
+    session = Session(key="test:del-turn-meta", last_consolidated=2)
+    for i in range(8):
+        session.messages.append(
+            {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)},
+        )
+    assert session.delete_turn_containing_assistant_at(5) is True
+    assert len(session.messages) == 6
+    assert session.last_consolidated == 2
+
+
+def test_delete_turn_rejects_non_assistant_index() -> None:
+    session = Session(key="test:del-invalid")
+    session.messages.append({"role": "user", "content": "u"})
+    assert session.delete_turn_containing_assistant_at(0) is False
