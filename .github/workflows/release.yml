@@ -34,6 +34,7 @@ jobs:
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "bundle_name=FireFly-Agent-Zotero-${VERSION}-windows.zip" >> "$GITHUB_OUTPUT"
           PLUGIN_VERSION=$(node -p "require('./plugin/package.json').version")
           BACKEND_VERSION=$(python - <<'PY'
           import tomllib
@@ -44,12 +45,6 @@ jobs:
           )
           echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
           echo "backend_version=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Verify release workflow is present
-        run: |
-          test -f .github/workflows/release.yml
-          test -f release/pack-llm-wiki-template.sh
-          test -f INSTALL.md
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -62,7 +57,7 @@ jobs:
           python -m build backend/FireFly
           ls -la backend/FireFly/dist/
 
-      - name: Pack llm-wiki template
+      - name: Pack llm-wiki template (CI internal)
         run: bash release/pack-llm-wiki-template.sh
 
       - name: Set up Node
@@ -77,48 +72,49 @@ jobs:
         run: |
           npm ci
           npm run build
-          ls -la .scaffold/build/
           test -f .scaffold/build/fire-fly-agent-zotero.xpi
 
-      - name: Stage release assets
+      - name: Build Windows release bundle (single ZIP)
         run: |
-          rm -rf release-upload
-          mkdir -p release-upload
-          cp plugin/.scaffold/build/fire-fly-agent-zotero.xpi release-upload/
-          cp plugin/.scaffold/build/update.json release-upload/
-          if [ -f plugin/.scaffold/build/update-beta.json ]; then
-            cp plugin/.scaffold/build/update-beta.json release-upload/
-          fi
-          cp backend/FireFly/dist/*.whl release-upload/
-          cp backend/FireFly/dist/*.tar.gz release-upload/
-          cp release-dist/llm-wiki-template.zip release-upload/
-          cp release/install-backend.ps1 release-upload/
-          cp release/install-backend.sh release-upload/
-          cp release/start-bridge.ps1 release-upload/
-          cp release/start-bridge.sh release-upload/
-          cp INSTALL.md release-upload/
-          echo "=== Release assets ==="
-          ls -la release-upload/
+          VERSION="${{ steps.meta.outputs.version }}"
+          BUNDLE_NAME="${{ steps.meta.outputs.bundle_name }}"
+          ROOT="release-staging/FireFly-Agent-Zotero-${VERSION}"
+          mkdir -p "$ROOT/plugin" "$ROOT/backend" "$ROOT/llm-wiki"
+          cp plugin/.scaffold/build/fire-fly-agent-zotero.xpi "$ROOT/plugin/"
+          cp plugin/.scaffold/build/update.json "$ROOT/plugin/"
+          cp backend/FireFly/dist/*.whl "$ROOT/backend/"
+          unzip -qo release-dist/llm-wiki-template.zip -d "$ROOT/llm-wiki"
+          cp release/install-backend.ps1 "$ROOT/"
+          cp release/start-bridge.ps1 "$ROOT/"
+          cp release/QUICKSTART.txt "$ROOT/"
+          cp INSTALL.md "$ROOT/"
+          mkdir -p release-dist
+          rm -f "release-dist/${BUNDLE_NAME}"
+          (cd release-staging && zip -rq "../release-dist/${BUNDLE_NAME}" "FireFly-Agent-Zotero-${VERSION}")
+          ls -la "release-dist/${BUNDLE_NAME}"
+          unzip -l "release-dist/${BUNDLE_NAME}" | head -30
 
       - name: Prepare release notes
         run: |
           cat > release-notes.md <<EOF
           ## FireFly-Agent-Zotero ${{ steps.meta.outputs.tag }}
 
-          > **不要下载**页面顶部的 \`Source code (zip)\`（那是 GitHub 自动附带的仓库快照）。
-          > 请在本页下方 **Assets** 中下载 \`.xpi\`、\`.whl\` 等文件。
+          > **请下载下方唯一安装包** \`${{ steps.meta.outputs.bundle_name }}\`（一键 ZIP）。
+          > **不要**点页面顶部的 \`Source code (zip)\`（那是 GitHub 自动附带的整仓源码）。
 
-          ### 插件
-          - \`fire-fly-agent-zotero.xpi\` (v${{ steps.meta.outputs.plugin_version }})
-          - \`update.json\` — 插件自动更新清单
+          ### 安装包内容（解压后）
+          - \`plugin/fire-fly-agent-zotero.xpi\` — Zotero 插件
+          - \`backend/firefly_ai-${{ steps.meta.outputs.backend_version }}-py3-none-any.whl\` — 后端
+          - \`llm-wiki/\` — 文献目录模板
+          - \`install-backend.ps1\` / \`start-bridge.ps1\` — Windows 脚本
+          - \`QUICKSTART.txt\` / \`INSTALL.md\`
 
-          ### 后端
-          - \`firefly_ai-${{ steps.meta.outputs.backend_version }}-py3-none-any.whl\`
-          - \`firefly_ai-${{ steps.meta.outputs.backend_version }}.tar.gz\`（Python 包源码，非整仓）
-          - \`llm-wiki-template.zip\`
-
-          ### 安装
-          见 \`INSTALL.md\` 或 \`install-backend.ps1\` / \`install-backend.sh\`。
+          ### 快速开始（Windows）
+          1. 解压 ZIP
+          2. PowerShell 执行 \`.\install-backend.ps1\`
+          3. 编辑 \`%USERPROFILE%\\FireFly-Agent-Zotero\\config\\config.json\` 填入 API Key
+          4. \`.\start-bridge.ps1\`
+          5. Zotero 安装 \`plugin\\fire-fly-agent-zotero.xpi\`
           EOF
 
       - name: Create GitHub Release
@@ -129,8 +125,8 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(steps.meta.outputs.version, '-') }}
-          fail_on_unmatched_files: false
-          files: release-upload/*
+          fail_on_unmatched_files: true
+          files: release-dist/${{ steps.meta.outputs.bundle_name }}
 
       - name: Publish plugin update channel (rolling release tag)
         env:

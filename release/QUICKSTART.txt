@@ -1,0 +1,21 @@
+FireFly-Agent-Zotero — Windows 一键安装包
+========================================
+
+1. 解压本 ZIP 到任意目录（路径尽量无中文空格）
+
+2. 右键「开始」-> 终端 / PowerShell，进入解压后的文件夹，执行：
+
+   .\install-backend.ps1
+
+3. 编辑 %USERPROFILE%\FireFly-Agent-Zotero\config\config.json ，填入 LLM API Key
+
+4. 启动后端（保持窗口不要关）：
+
+   .\start-bridge.ps1
+
+5. Zotero -> 工具 -> 插件 -> 从文件安装 -> 选择本包内 plugin\fire-fly-agent-zotero.xpi
+
+详细说明见 INSTALL.md
+
+不要下载 GitHub Release 页顶部的「Source code (zip)」，应下载
+FireFly-Agent-Zotero-vX.Y.Z-windows.zip 一体包。

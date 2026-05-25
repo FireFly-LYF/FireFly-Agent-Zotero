@@ -4,6 +4,7 @@
 .docs
 .web
 release-dist/
+release-staging/
 
 # Monorepo subprojects (explicit)
 plugin/node_modules/

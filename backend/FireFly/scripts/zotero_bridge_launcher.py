@@ -5,7 +5,7 @@ Development (monorepo clone):
   python backend/FireFly/scripts/zotero_bridge_launcher.py
 
 Release install:
-  ~/FireFly-Agent-Zotero/release/start-bridge.sh
+  %USERPROFILE%\\FireFly-Agent-Zotero\\release\\start-bridge.ps1
   or start-bridge.ps1
 """
 
