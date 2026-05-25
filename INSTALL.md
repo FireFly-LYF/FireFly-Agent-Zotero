@@ -26,7 +26,11 @@
 
 ### 1. 下载
 
-在 [GitHub Releases](https://github.com/FireFly-LYF/FireFly-agent-zotero/releases) 打开对应版本，下载：
+在 [GitHub Releases](https://github.com/FireFly-LYF/FireFly-agent-zotero/releases) 打开对应版本。
+
+> **重要**：不要点页面顶部 **Source code (zip)** / **Source code (tar.gz)**——那是 GitHub 自动附带的**整仓源码快照**，不是安装包。
+>
+> 请滚动到页面下方 **Assets（资产）** 区域，下载：
 
 - `fire-fly-agent-zotero.xpi`
 - `firefly_ai-*-py3-none-any.whl`

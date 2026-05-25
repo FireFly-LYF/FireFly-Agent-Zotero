@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild (e.g. v3.7.30)"
+        required: true
+        default: "v3.7.30"
 
 permissions:
   contents: write
@@ -14,11 +20,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Resolve version
         id: meta
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -32,6 +44,12 @@ jobs:
           )
           echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
           echo "backend_version=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release workflow is present
+        run: |
+          test -f .github/workflows/release.yml
+          test -f release/pack-llm-wiki-template.sh
+          test -f INSTALL.md
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -60,53 +78,66 @@ jobs:
           npm ci
           npm run build
           ls -la .scaffold/build/
+          test -f .scaffold/build/fire-fly-agent-zotero.xpi
+
+      - name: Stage release assets
+        run: |
+          rm -rf release-upload
+          mkdir -p release-upload
+          cp plugin/.scaffold/build/fire-fly-agent-zotero.xpi release-upload/
+          cp plugin/.scaffold/build/update.json release-upload/
+          if [ -f plugin/.scaffold/build/update-beta.json ]; then
+            cp plugin/.scaffold/build/update-beta.json release-upload/
+          fi
+          cp backend/FireFly/dist/*.whl release-upload/
+          cp backend/FireFly/dist/*.tar.gz release-upload/
+          cp release-dist/llm-wiki-template.zip release-upload/
+          cp release/install-backend.ps1 release-upload/
+          cp release/install-backend.sh release-upload/
+          cp release/start-bridge.ps1 release-upload/
+          cp release/start-bridge.sh release-upload/
+          cp INSTALL.md release-upload/
+          echo "=== Release assets ==="
+          ls -la release-upload/
 
       - name: Prepare release notes
         run: |
           cat > release-notes.md <<EOF
           ## FireFly-Agent-Zotero ${{ steps.meta.outputs.tag }}
 
+          > **不要下载**页面顶部的 \`Source code (zip)\`（那是 GitHub 自动附带的仓库快照）。
+          > 请在本页下方 **Assets** 中下载 \`.xpi\`、\`.whl\` 等文件。
+
           ### 插件
-          - XPI: \`fire-fly-agent-zotero.xpi\` (v${{ steps.meta.outputs.plugin_version }})
-          - 自动更新清单: \`update.json\`
+          - \`fire-fly-agent-zotero.xpi\` (v${{ steps.meta.outputs.plugin_version }})
+          - \`update.json\` — 插件自动更新清单
 
           ### 后端
-          - Wheel: \`firefly_ai-${{ steps.meta.outputs.backend_version }}-py3-none-any.whl\`
-          - 源码包: \`firefly_ai-${{ steps.meta.outputs.backend_version }}.tar.gz\`
-          - llm-wiki 模板: \`llm-wiki-template.zip\`
+          - \`firefly_ai-${{ steps.meta.outputs.backend_version }}-py3-none-any.whl\`
+          - \`firefly_ai-${{ steps.meta.outputs.backend_version }}.tar.gz\`（Python 包源码，非整仓）
+          - \`llm-wiki-template.zip\`
 
           ### 安装
-          见仓库 \`INSTALL.md\` 或 Release 中的 \`install-backend.ps1\` / \`install-backend.sh\`。
-
-          **兼容**: 本 Release 插件 v${{ steps.meta.outputs.plugin_version }} 搭配后端 firefly-ai v${{ steps.meta.outputs.backend_version }}。
+          见 \`INSTALL.md\` 或 \`install-backend.ps1\` / \`install-backend.sh\`。
           EOF
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag }}
           name: FireFly-Agent-Zotero ${{ steps.meta.outputs.tag }}
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(steps.meta.outputs.version, '-') }}
-          files: |
-            plugin/.scaffold/build/fire-fly-agent-zotero.xpi
-            plugin/.scaffold/build/update.json
-            plugin/.scaffold/build/update-beta.json
-            backend/FireFly/dist/*.whl
-            backend/FireFly/dist/*.tar.gz
-            release-dist/llm-wiki-template.zip
-            release/install-backend.ps1
-            release/install-backend.sh
-            release/start-bridge.ps1
-            release/start-bridge.sh
-            INSTALL.md
+          fail_on_unmatched_files: false
+          files: release-upload/*
 
       - name: Publish plugin update channel (rolling release tag)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           MANIFEST=plugin/.scaffold/build/update.json
-          if [ -f plugin/.scaffold/build/update-beta.json ] && echo "${{ steps.meta.outputs.version }}" | grep -q '-'; then
+          if [ -f plugin/.scaffold/build/update-beta.json ] && echo "${{ steps.meta.outputs.version }}" | grep -qF '-'; then
             MANIFEST=plugin/.scaffold/build/update-beta.json
           fi
           if gh release view release >/dev/null 2>&1; then
