@@ -295,60 +295,65 @@ export async function syncAllLibraryPDFsToWikiRawDir(): Promise<void> {
   );
 }
 
-async function resolveSelectedPdfAttachment(): Promise<any | null> {
-  const resolvePdfAttachmentFromItem = async (candidate: any): Promise<any | null> => {
-    if (!candidate) return null;
-    if (candidate?.isAttachment?.()) {
-      const ct = String(candidate.attachmentContentType || "").toLowerCase();
-      if (ct.includes("pdf")) return candidate;
-      return null;
-    }
-    const best = await candidate?.getBestAttachment?.();
-    if (best && best?.isAttachment?.()) {
-      const ct = String(best.attachmentContentType || "").toLowerCase();
-      if (ct.includes("pdf")) return best;
-    }
+async function resolvePdfAttachmentFromItem(candidate: any): Promise<any | null> {
+  if (!candidate) return null;
+  if (candidate?.isAttachment?.()) {
+    const ct = String(candidate.attachmentContentType || "").toLowerCase();
+    if (ct.includes("pdf")) return candidate;
     return null;
-  };
+  }
+  const best = await candidate?.getBestAttachment?.();
+  if (best && best?.isAttachment?.()) {
+    const ct = String(best.attachmentContentType || "").toLowerCase();
+    if (ct.includes("pdf")) return best;
+  }
+  return null;
+}
 
-  const resolveActiveReaderPdfAttachment = async (): Promise<any | null> => {
-    try {
-      const mainWin = Zotero.getMainWindow() as any;
-      const tabs = ztoolkit.getGlobal("Zotero_Tabs") || mainWin?.Zotero_Tabs;
-      if (!tabs) return null;
-      const tabsAny = tabs as any;
-
-      const selectedTabID =
-        tabsAny.selectedID || tabsAny._selectedID || tabsAny.selected || tabsAny._selected || null;
-      if (!selectedTabID) return null;
-
-      let tab: any = null;
-      if (typeof tabsAny.getTab === "function") {
-        tab = tabsAny.getTab(selectedTabID);
-      } else if (typeof tabsAny._getTab === "function") {
-        tab = tabsAny._getTab(selectedTabID);
-      } else if (tabsAny._tabs && typeof tabsAny._tabs === "object") {
-        tab = tabsAny._tabs[selectedTabID] || null;
-      }
-      if (!tab) return null;
-
-      const tabType = String(tab?.type || tab?.tabType || "").toLowerCase();
-      if (tabType !== "reader") return null;
-
-      const readerItemID = Number(
-        tab?.data?.itemID || tab?.itemID || tab?.data?.id || 0,
-      );
-      if (!readerItemID) return null;
-      const readerItem = Zotero.Items.get(readerItemID) as any;
-      return await resolvePdfAttachmentFromItem(readerItem);
-    } catch (e) {
-      logInfo("[wiki-pdf-sync] resolve active reader attachment failed:", String(e));
-      return null;
-    }
-  };
-
+async function resolveActiveReaderPdfAttachment(): Promise<any | null> {
   try {
-    // 优先使用当前激活的 reader 标签，确保与“正在阅读的文献”一致。
+    const mainWin = Zotero.getMainWindow() as any;
+    const tabs = ztoolkit.getGlobal("Zotero_Tabs") || mainWin?.Zotero_Tabs;
+    if (!tabs) return null;
+    const tabsAny = tabs as any;
+
+    const selectedTabID =
+      tabsAny.selectedID || tabsAny._selectedID || tabsAny.selected || tabsAny._selected || null;
+    if (!selectedTabID) return null;
+
+    let tab: any = null;
+    if (typeof tabsAny.getTab === "function") {
+      tab = tabsAny.getTab(selectedTabID);
+    } else if (typeof tabsAny._getTab === "function") {
+      tab = tabsAny._getTab(selectedTabID);
+    } else if (tabsAny._tabs && typeof tabsAny._tabs === "object") {
+      tab = tabsAny._tabs[selectedTabID] || null;
+    }
+    if (!tab) return null;
+
+    const tabType = String(tab?.type || tab?.tabType || "").toLowerCase();
+    if (tabType !== "reader") return null;
+
+    const readerItemID = Number(tab?.data?.itemID || tab?.itemID || tab?.data?.id || 0);
+    if (!readerItemID) return null;
+    const readerItem = Zotero.Items.get(readerItemID) as any;
+    return await resolvePdfAttachmentFromItem(readerItem);
+  } catch (e) {
+    logInfo("[wiki-pdf-sync] resolve active reader attachment failed:", String(e));
+    return null;
+  }
+}
+
+/** 解析当前应处理的 PDF 附件：Item Pane 条目 > Reader 标签 > 库中选中的条目。 */
+async function resolveSelectedPdfAttachment(preferredItem?: any): Promise<any | null> {
+  try {
+    if (preferredItem) {
+      const paneAttachment = await resolvePdfAttachmentFromItem(preferredItem);
+      if (paneAttachment) {
+        return paneAttachment;
+      }
+    }
+
     const readerAttachment = await resolveActiveReaderPdfAttachment();
     if (readerAttachment) {
       return readerAttachment;
@@ -364,19 +369,23 @@ async function resolveSelectedPdfAttachment(): Promise<any | null> {
   return null;
 }
 
-export async function getCurrentWikiPdfInfoForConversion(): Promise<{
+export type WikiPdfInfoForConversion = {
   pdfPath: string;
   pdfDir: string;
   pdfName: string;
   wikiPdfPath: string;
-} | null> {
+};
+
+export type WikiPdfInfoResolveResult =
+  | { ok: true; data: WikiPdfInfoForConversion }
+  | { ok: false; message: string };
+
+async function buildWikiPdfInfoFromAttachment(
+  attachment: any,
+  wikiPdfRoot: string,
+): Promise<WikiPdfInfoForConversion | null> {
   const pathUtils = getPathUtils();
   if (!pathUtils?.join) return null;
-  const wikiPdfRoot = await resolveWikiPdfRoot();
-  if (!wikiPdfRoot) return null;
-
-  const attachment = await resolveSelectedPdfAttachment();
-  if (!attachment) return null;
 
   const sourcePath = String((await attachment.getFilePathAsync?.()) || "").trim();
   if (!sourcePath) return null;
@@ -399,7 +408,44 @@ export async function getCurrentWikiPdfInfoForConversion(): Promise<{
   };
 }
 
-export type WikiPdfInfoForConversion = NonNullable<Awaited<ReturnType<typeof getCurrentWikiPdfInfoForConversion>>>;
+export async function resolveWikiPdfInfo(options?: {
+  preferredItem?: any;
+}): Promise<WikiPdfInfoResolveResult> {
+  const pathUtils = getPathUtils();
+  if (!pathUtils?.join) {
+    return { ok: false, message: "当前环境缺少 PathUtils，无法定位 llm-wiki 路径。" };
+  }
+  const wikiPdfRoot = await resolveWikiPdfRoot();
+  if (!wikiPdfRoot) {
+    return {
+      ok: false,
+      message: `未找到 llm-wiki/raw/pdf 目录。请确认仓库中存在该目录，或检查 wikiPdfSync.ts 中的路径配置。\n候选：${LLM_WIKI_PDF_ROOT_CANDIDATES[0]}`,
+    };
+  }
+
+  const attachment = await resolveSelectedPdfAttachment(options?.preferredItem);
+  if (!attachment) {
+    const hint = options?.preferredItem
+      ? "当前 Item Pane 条目没有可用的 PDF 附件。"
+      : "未找到 PDF：请在库中选中带 PDF 的条目，或在 Reader 中打开 PDF。";
+    return { ok: false, message: hint };
+  }
+
+  const data = await buildWikiPdfInfoFromAttachment(attachment, wikiPdfRoot);
+  if (!data) {
+    return { ok: false, message: "已找到 PDF 附件，但无法读取本地文件路径。" };
+  }
+  return { ok: true, data };
+}
+
+export async function getCurrentWikiPdfInfoForConversion(
+  preferredItem?: any,
+): Promise<WikiPdfInfoForConversion | null> {
+  const resolved = await resolveWikiPdfInfo(
+    preferredItem != null ? { preferredItem } : undefined,
+  );
+  return resolved.ok ? resolved.data : null;
+}
 
 /**
  * 一键转换前：若 llm-wiki/raw/pdf 下预期镜像不存在，则从 Zotero 附件路径复制过去，避免 wiki 路径与本地库脱节。

@@ -11,8 +11,26 @@ const BRIDGE_PDF_OPENED_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/pdf-o
 const BRIDGE_CONVERT_MARKDOWN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/convert-markdown`;
 const BRIDGE_WIKI_INGEST_MARKDOWN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/wiki-ingest-markdown`;
 const BRIDGE_DELETE_TURN_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/session/delete-turn`;
+const BRIDGE_SETTINGS_URL = `http://${BRIDGE_HOST}:${BRIDGE_PORT}/zotero/settings`;
+
+export type SettingsFileKey = "config" | "context" | "user";
+
+export interface SettingsFilePayload {
+  path: string;
+  exists: boolean;
+  content: string;
+  error?: string;
+}
+
+export interface SaveSettingsResult {
+  ok: boolean;
+  saved?: string[];
+  errors?: Record<string, string>;
+  restart_recommended?: boolean;
+}
 
 const WIKI_INGEST_MARKDOWN_TIMEOUT_MS = 600_000;
+const CONVERT_MARKDOWN_TIMEOUT_MS = 600_000;
 
 const HEALTH_RETRY = 40;
 const HEALTH_INTERVAL_MS = 500;
@@ -24,7 +42,7 @@ function sleep(ms: number) {
 }
 
 async function zoteroHttpRequest(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   url: string,
   options: {
     headers?: Record<string, string>;
@@ -115,7 +133,7 @@ export async function ensureFireFlyBridgeStarted(): Promise<void> {
     await sleep(HEALTH_INTERVAL_MS);
   }
   throw new Error(
-    "FireFly bridge not ready. Please run backend/FireFly/scripts/zotero_bridge_launcher.py manually.",
+    "FireFly bridge not ready. Start the backend: run release/start-bridge.ps1 (Release) or python backend/FireFly/scripts/zotero_bridge_launcher.py (dev). See INSTALL.md.",
   );
 }
 
@@ -529,6 +547,8 @@ export async function convertCurrentPdfToMarkdown(payload: {
   rebuild_rag?: boolean;
   /** 仅高级用途：为 true 时从 PDF 覆盖已有 .md；默认 false（有 .md 则只重建 RAG） */
   force_markdown?: boolean;
+  /** 默认 true：导出图片到 `<stem>.assets/` */
+  write_images?: boolean;
 }) {
   const body = JSON.stringify({
     pdf_path: String(payload.pdf_path || "").trim(),
@@ -537,15 +557,18 @@ export async function convertCurrentPdfToMarkdown(payload: {
     wiki_pdf_path: String(payload.wiki_pdf_path || "").trim(),
     rebuild_rag: payload.rebuild_rag !== false,
     force_markdown: payload.force_markdown === true,
+    write_images: payload.write_images !== false,
   });
   try {
     const resp = await zoteroHttpRequest("POST", BRIDGE_CONVERT_MARKDOWN_URL, {
       headers: { "Content-Type": "application/json" },
       body,
-      timeout: SEND_TIMEOUT_MS * 8,
+      timeout: CONVERT_MARKDOWN_TIMEOUT_MS,
     });
     if (resp.status < 200 || resp.status >= 300) {
-      throw new Error(`Bridge convert-markdown failed: ${resp.status} ${resp.responseText}`);
+      throw new Error(
+        `Bridge convert-markdown failed: ${resp.status} ${formatBridgeErrorBody(resp.responseText)}`,
+      );
     }
     return JSON.parse(resp.responseText || "{}");
   } catch (_e1) {
@@ -556,13 +579,83 @@ export async function convertCurrentPdfToMarkdown(payload: {
         headers: { "Content-Type": "application/json" },
         body,
       },
-      SEND_TIMEOUT_MS * 8,
+      CONVERT_MARKDOWN_TIMEOUT_MS,
     );
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Bridge convert-markdown failed: ${res.status} ${text}`);
+      throw new Error(
+        `Bridge convert-markdown failed: ${res.status} ${formatBridgeErrorBody(text)}`,
+      );
     }
     return res.json();
   }
+}
+
+function formatBridgeErrorBody(raw: string): string {
+  const text = String(raw || "").trim();
+  if (!text) return "(empty response)";
+  try {
+    const parsed = JSON.parse(text) as { error?: string; error_log?: string | null };
+    const parts: string[] = [];
+    if (parsed.error) parts.push(String(parsed.error));
+    if (parsed.error_log) parts.push(`详细日志: ${parsed.error_log}`);
+    return parts.length ? parts.join("\n") : text;
+  } catch {
+    return text;
+  }
+}
+
+export async function fetchBridgeSettings(): Promise<
+  Record<SettingsFileKey, SettingsFilePayload>
+> {
+  const res = await zoteroHttpRequest("GET", BRIDGE_SETTINGS_URL, { timeout: 15000 });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(
+      `Bridge settings GET failed: ${res.status} ${formatBridgeErrorBody(res.responseText)}`,
+    );
+  }
+  const parsed = JSON.parse(res.responseText) as {
+    ok?: boolean;
+    files?: Record<string, SettingsFilePayload>;
+  };
+  const files = parsed.files || {};
+  return {
+    config: files.config || { path: "", exists: false, content: "" },
+    context: files.context || { path: "", exists: false, content: "" },
+    user: files.user || { path: "", exists: false, content: "" },
+  };
+}
+
+export async function saveBridgeSettings(
+  payload: Partial<Record<SettingsFileKey, string>>,
+): Promise<SaveSettingsResult> {
+  const body = JSON.stringify(payload);
+  let res = await zoteroHttpRequest("PUT", BRIDGE_SETTINGS_URL, {
+    headers: { "Content-Type": "application/json" },
+    body,
+    timeout: 30000,
+  });
+  if (res.status === 405 || res.status === 501) {
+    res = await zoteroHttpRequest("POST", BRIDGE_SETTINGS_URL, {
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeout: 30000,
+    });
+  }
+  let parsed: SaveSettingsResult;
+  try {
+    parsed = JSON.parse(res.responseText) as SaveSettingsResult;
+  } catch {
+    throw new Error(
+      `Bridge settings save failed: ${res.status} ${formatBridgeErrorBody(res.responseText)}`,
+    );
+  }
+  if (res.status < 200 || res.status >= 300) {
+    return {
+      ok: false,
+      errors: parsed.errors || { _http: `HTTP ${res.status}` },
+    };
+  }
+  return parsed;
 }
 

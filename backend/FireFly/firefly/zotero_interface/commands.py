@@ -1672,55 +1672,116 @@ def agent(
                         "had_prior_rag_index": had_prior_rag_index,
                     }
 
+                _PDF_CONVERT_TIMEOUT_SEC = 1800
+                _pdf_convert_lock = asyncio.Lock()
+
                 async def _ensure_pdf_converted(
                     pdf_path: Path,
                     markdown_path: Path,
                     *,
                     force_markdown: bool = False,
+                    force_ocr: bool = False,
+                    use_ocr: bool = False,
+                    write_images: bool = True,
                 ) -> dict[str, Any]:
+                    try:
+                        from firefly.skills.markdown.scripts.pdf_to_markdown import (
+                            _assets_look_fragmented,
+                            convert_one as _pdf_to_md,
+                        )
+                    except SystemExit as exc:
+                        raise RuntimeError(
+                            "缺少 pymupdf4llm。请在 FireFly 环境中执行："
+                            " pip install pymupdf4llm"
+                        ) from exc
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "缺少 pymupdf4llm。请在 FireFly 环境中执行："
+                            " pip install pymupdf4llm"
+                        ) from exc
+
                     had_markdown = markdown_path.is_file()
-                    if not force_markdown and had_markdown:
+                    assets_dir = markdown_path.parent / f"{markdown_path.stem}.assets"
+                    needs_images = write_images and (
+                        not assets_dir.is_dir()
+                        or not any(assets_dir.iterdir())
+                        or _assets_look_fragmented(assets_dir)
+                    )
+                    if not force_markdown and had_markdown and not needs_images:
                         return {
                             "converted": False,
                             "reason": "already_converted",
                         }
 
-                    script_path = (
-                        Path(__file__).resolve().parents[1]
-                        / "skills"
-                        / "markdown"
-                        / "scripts"
-                        / "pdf_to_markdown.py"
-                    )
-                    if not script_path.is_file():
-                        raise FileNotFoundError(f"converter script not found: {script_path}")
-
-                    cmd: list[str | Path] = [
-                        sys.executable,
-                        str(script_path),
-                        "--pdf",
-                        str(pdf_path),
-                        "--markdown",
-                        str(markdown_path),
-                    ]
-                    if force_markdown:
-                        cmd.append("--overwrite")
-
-                    proc = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout_b, stderr_b = await proc.communicate()
-                    stdout = stdout_b.decode("utf-8", errors="replace")
-                    stderr = stderr_b.decode("utf-8", errors="replace")
-                    if proc.returncode != 0:
+                    try:
+                        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+                    except OSError as exc:
                         raise RuntimeError(
-                            f"pdf convert failed (code={proc.returncode}): {stderr or stdout}".strip()
+                            f"cannot create markdown output directory: {exc}"
+                        ) from exc
+
+                    logger.info(
+                        "pdf_to_markdown start: {} -> {} (use_ocr={}, force_ocr={}, write_images={})",
+                        pdf_path,
+                        markdown_path,
+                        use_ocr,
+                        force_ocr,
+                        write_images,
+                    )
+                    try:
+                        pdf_size = pdf_path.stat().st_size
+                    except OSError:
+                        pdf_size = -1
+                    logger.info("pdf_to_markdown input size={} bytes", pdf_size)
+
+                    def _run_convert() -> dict[str, object]:
+                        return _pdf_to_md(
+                            pdf_path,
+                            markdown_path,
+                            overwrite=force_markdown,
+                            force_ocr=force_ocr,
+                            ocr_language="chi_sim+eng",
+                            use_ocr=use_ocr,
+                            write_images=write_images,
                         )
+
+                    try:
+                        async with _pdf_convert_lock:
+                            conv = await asyncio.wait_for(
+                                asyncio.to_thread(_run_convert),
+                                timeout=_PDF_CONVERT_TIMEOUT_SEC,
+                            )
+                    except asyncio.TimeoutError as exc:
+                        raise RuntimeError(
+                            f"pdf convert timed out after {_PDF_CONVERT_TIMEOUT_SEC}s: {pdf_path}"
+                        ) from exc
+                    except Exception as exc:
+                        logger.exception(
+                            "pdf_to_markdown failed: {} -> {}",
+                            pdf_path,
+                            markdown_path,
+                        )
+                        raise RuntimeError(f"pdf convert failed: {exc}") from exc
+
+                    if not markdown_path.is_file():
+                        raise RuntimeError(
+                            f"pdf convert reported success but markdown missing: {markdown_path}"
+                        )
+
+                    status = str(conv.get("status") or "").strip()
+                    if status == "skipped":
+                        return {
+                            "converted": False,
+                            "reason": "already_converted",
+                        }
+                    if status != "converted":
+                        raise RuntimeError(
+                            f"pdf convert unexpected status={status!r}: {conv}"
+                        )
+
+                    logger.info("pdf_to_markdown done: {}", markdown_path)
                     return {
                         "converted": True,
-                        "stdout": stdout.strip(),
                         "reason": "markdown_regenerated"
                         if (force_markdown and had_markdown)
                         else "converted",
@@ -1759,25 +1820,54 @@ def agent(
                         markdown_path = markdown_path.expanduser().resolve()
                     except Exception:
                         markdown_path = markdown_path.expanduser()
+                    try:
+                        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+                    except OSError as exc:
+                        return web.json_response(
+                            {
+                                "ok": False,
+                                "error": f"cannot create markdown parent dir: {exc}",
+                                "markdown_path": str(markdown_path),
+                            },
+                            status=500,
+                        )
+                    logger.info(
+                        "convert-markdown: pdf={} markdown={}",
+                        pdf_path,
+                        markdown_path,
+                    )
                     # force_markdown：即使已有 .md 也从 PDF 重转（传 pdf_to_markdown --overwrite）。
                     # 未指定时保持旧行为：有 md 则跳过 PDF，仅重建 RAG。
                     raw_body = body or {}
                     force_markdown = bool(
                         raw_body.get("force_markdown") or raw_body.get("forceMarkdown")
                     )
+                    force_ocr = bool(raw_body.get("force_ocr") or raw_body.get("forceOcr"))
+                    use_ocr = bool(raw_body.get("use_ocr") or raw_body.get("useOcr") or force_ocr)
+                    if "write_images" in raw_body or "writeImages" in raw_body:
+                        write_images = bool(
+                            raw_body.get("write_images") or raw_body.get("writeImages")
+                        )
+                    else:
+                        write_images = True
                     try:
                         result = await _ensure_pdf_converted(
                             pdf_path,
                             markdown_path,
                             force_markdown=force_markdown,
+                            force_ocr=force_ocr,
+                            use_ocr=use_ocr,
+                            write_images=write_images,
                         )
                     except Exception as exc:
+                        err_log = markdown_path.with_suffix(".md.convert-error.txt")
                         return web.json_response(
                             {
                                 "ok": False,
                                 "error": str(exc),
                                 "pdf_path": str(pdf_path),
                                 "markdown_path": str(markdown_path),
+                                "error_log": str(err_log) if err_log.is_file() else None,
                             },
                             status=500,
                         )
@@ -2034,6 +2124,27 @@ def agent(
                     agent_loop.sessions.save(sess)
                     return web.json_response({"ok": True, "detail": "deleted"})
 
+                async def _get_settings(_request: web.Request) -> web.Response:
+                    from firefly.zotero_interface.settings_store import read_settings_bundle
+
+                    return web.json_response(read_settings_bundle())
+
+                async def _put_settings(request: web.Request) -> web.Response:
+                    from firefly.zotero_interface.settings_store import write_settings_bundle
+
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        body = {}
+                    if not isinstance(body, dict):
+                        return web.json_response(
+                            {"ok": False, "error": "body must be a JSON object"},
+                            status=400,
+                        )
+                    result = write_settings_bundle(body)
+                    status = 200 if result.get("ok") else 400
+                    return web.json_response(result, status=status)
+
                 app = web.Application()
                 app.router.add_get("/health", _health)
                 app.router.add_get("/zotero/meta", _meta)
@@ -2046,6 +2157,9 @@ def agent(
                 app.router.add_post("/zotero/session/clear", _clear_session)
                 app.router.add_post("/zotero/pdf-opened", _pdf_opened)
                 app.router.add_post("/zotero/convert-markdown", _convert_markdown)
+                app.router.add_get("/zotero/settings", _get_settings)
+                app.router.add_put("/zotero/settings", _put_settings)
+                app.router.add_post("/zotero/settings", _put_settings)
                 runner = web.AppRunner(app)
                 await runner.setup()
                 site = web.TCPSite(runner, zotero_bridge_host, zotero_bridge_port)

@@ -39,3 +39,7 @@
 2、新增删除、重置按钮，可删除/重新发送历史对话;   
 3、现在可通过markdown攥写wiki，用户提问时将wiki组装为上下文;   
 4、LLM wiki目前仅进行了单文件测试，尚未验证能否总结出多篇文章之间的联系。
+
+2026.5.25  
+1、插件设置页可编辑 backend/config 三份 JSON；  
+2、GitHub Release 一体包：XPI + firefly_ai wheel + llm-wiki 模板 + 安装脚本，见 [INSTALL.md](INSTALL.md)。

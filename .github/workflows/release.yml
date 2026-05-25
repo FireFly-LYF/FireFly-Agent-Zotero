@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          PLUGIN_VERSION=$(node -p "require('./plugin/package.json').version")
+          BACKEND_VERSION=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path("backend/FireFly/pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          PY
+          )
+          echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "backend_version=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build backend wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build backend/FireFly
+          ls -la backend/FireFly/dist/
+
+      - name: Pack llm-wiki template
+        run: bash release/pack-llm-wiki-template.sh
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+
+      - name: Build Zotero plugin (XPI)
+        working-directory: plugin
+        run: |
+          npm ci
+          npm run build
+          ls -la .scaffold/build/
+
+      - name: Prepare release notes
+        run: |
+          cat > release-notes.md <<EOF
+          ## FireFly-Agent-Zotero ${{ steps.meta.outputs.tag }}
+
+          ### 插件
+          - XPI: \`fire-fly-agent-zotero.xpi\` (v${{ steps.meta.outputs.plugin_version }})
+          - 自动更新清单: \`update.json\`
+
+          ### 后端
+          - Wheel: \`firefly_ai-${{ steps.meta.outputs.backend_version }}-py3-none-any.whl\`
+          - 源码包: \`firefly_ai-${{ steps.meta.outputs.backend_version }}.tar.gz\`
+          - llm-wiki 模板: \`llm-wiki-template.zip\`
+
+          ### 安装
+          见仓库 \`INSTALL.md\` 或 Release 中的 \`install-backend.ps1\` / \`install-backend.sh\`。
+
+          **兼容**: 本 Release 插件 v${{ steps.meta.outputs.plugin_version }} 搭配后端 firefly-ai v${{ steps.meta.outputs.backend_version }}。
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FireFly-Agent-Zotero ${{ steps.meta.outputs.tag }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.version, '-') }}
+          files: |
+            plugin/.scaffold/build/fire-fly-agent-zotero.xpi
+            plugin/.scaffold/build/update.json
+            plugin/.scaffold/build/update-beta.json
+            backend/FireFly/dist/*.whl
+            backend/FireFly/dist/*.tar.gz
+            release-dist/llm-wiki-template.zip
+            release/install-backend.ps1
+            release/install-backend.sh
+            release/start-bridge.ps1
+            release/start-bridge.sh
+            INSTALL.md
+
+      - name: Publish plugin update channel (rolling release tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MANIFEST=plugin/.scaffold/build/update.json
+          if [ -f plugin/.scaffold/build/update-beta.json ] && echo "${{ steps.meta.outputs.version }}" | grep -q '-'; then
+            MANIFEST=plugin/.scaffold/build/update-beta.json
+          fi
+          if gh release view release >/dev/null 2>&1; then
+            gh release upload release "$MANIFEST" --clobber
+          else
+            gh release create release "$MANIFEST" \
+              --title "Plugin auto-update channel" \
+              --notes "Rolling update manifest for Zotero plugin. Do not delete."
+          fi

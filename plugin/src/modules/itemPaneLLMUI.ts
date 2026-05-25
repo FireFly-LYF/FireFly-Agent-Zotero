@@ -13,7 +13,7 @@ import {
   triggerWikiIngestFromMarkdown,
 } from "./fireflyBridge";
 import { config } from "../../package.json";
-import { ensureWikiPdfMirrorIfMissing, getCurrentWikiPdfInfoForConversion } from "./wikiPdfSync";
+import { ensureWikiPdfMirrorIfMissing, resolveWikiPdfInfo } from "./wikiPdfSync";
 
 let bridgeHealthTimer: number | null = null;
 
@@ -825,14 +825,35 @@ export function registerLLMItemPaneSection() {
         });
         return btn;
       };
+      /** 防止 Zotero Item Pane 上层抢占 mousedown/click，确保工具栏按钮可触发。 */
+      const bindPaneActionButton = (btn: HTMLButtonElement, handler: () => void) => {
+        btn.addEventListener("mousedown", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+        });
+        btn.addEventListener(
+          "click",
+          (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            handler();
+          },
+          { capture: true },
+        );
+      };
+      const appendToolIcon = (btn: HTMLButtonElement, iconSrc: string, alt: string, sizePx = 16) => {
+        const icon = ownerDoc.createElement("img");
+        icon.src = iconSrc;
+        icon.alt = alt;
+        icon.style.width = `${sizePx}px`;
+        icon.style.height = `${sizePx}px`;
+        icon.style.pointerEvents = "none";
+        btn.appendChild(icon);
+        return icon;
+      };
 
       const slashBtn = createToolBtn("命令");
-      const slashIcon = ownerDoc.createElement("img");
-      slashIcon.src = `${iconBase}/bars.svg`;
-      slashIcon.alt = "command";
-      slashIcon.style.width = "16px";
-      slashIcon.style.height = "16px";
-      slashBtn.appendChild(slashIcon);
+      appendToolIcon(slashBtn, `${iconBase}/bars.svg`, "command");
 
       function getSelectedTextFromZotero(): string {
         const mainWin = Zotero.getMainWindow() as Window | null;
@@ -866,12 +887,7 @@ export function registerLLMItemPaneSection() {
       }
 
       const fontBtn = createToolBtn("截取文字");
-      const fontIcon = ownerDoc.createElement("img");
-      fontIcon.src = `${iconBase}/font-size.svg`;
-      fontIcon.alt = "font";
-      fontIcon.style.width = "16px";
-      fontIcon.style.height = "16px";
-      fontBtn.appendChild(fontIcon);
+      appendToolIcon(fontBtn, `${iconBase}/font-size.svg`, "font");
       const applySelectedTextAsContext = () => {
         const selectedText = getSelectedTextFromZotero();
         if (!selectedText) {
@@ -897,12 +913,7 @@ export function registerLLMItemPaneSection() {
       });
 
       const screenshotBtn = createToolBtn("截图工具");
-      const imageIcon = ownerDoc.createElement("img");
-      imageIcon.src = `${iconBase}/picture.svg`;
-      imageIcon.alt = "image";
-      imageIcon.style.width = "16px";
-      imageIcon.style.height = "16px";
-      screenshotBtn.appendChild(imageIcon);
+      appendToolIcon(screenshotBtn, `${iconBase}/picture.svg`, "image");
       const startAreaScreenshotCapture = async () => {
         const captureWin = ownerDoc.defaultView as Window | null;
         if (!captureWin) {
@@ -1023,7 +1034,7 @@ export function registerLLMItemPaneSection() {
         }
         await addImageContextFromBlob(blob, "snip");
       };
-      screenshotBtn.addEventListener("click", () => {
+      bindPaneActionButton(screenshotBtn, () => {
         if (isSending) return;
         void (async () => {
           try {
@@ -1037,12 +1048,7 @@ export function registerLLMItemPaneSection() {
       });
 
       const convertBtn = createToolBtn("Markdown → RAG（一键）");
-      const convertIcon = ownerDoc.createElement("img");
-      convertIcon.src = `${iconBase}/convert.svg`;
-      convertIcon.alt = "convert";
-      convertIcon.style.width = "16px";
-      convertIcon.style.height = "16px";
-      convertBtn.appendChild(convertIcon);
+      appendToolIcon(convertBtn, `${iconBase}/convert.svg`, "convert");
       const syncConvertButtonState = () => {
         const disabled = isConvertingLiterature;
         convertBtn.disabled = disabled;
@@ -1054,16 +1060,25 @@ export function registerLLMItemPaneSection() {
       };
       const triggerCurrentPdfMarkdownConversion = async () => {
         if (isConvertingLiterature) return;
-        const pdfInfo = await getCurrentWikiPdfInfoForConversion();
-        if (!pdfInfo) {
-          appendBubble("system", "未找到当前条目的 PDF，无法执行 Markdown 转换");
-          return;
-        }
         isConvertingLiterature = true;
         syncConvertButtonState();
         syncContextBar();
         try {
+          const resolved = await resolveWikiPdfInfo({ preferredItem: item });
+          if (!resolved.ok) {
+            appendBubble("system", resolved.message);
+            return;
+          }
+          const pdfInfo = resolved.data;
+          ztoolkit.log(
+            "[llm-ui] convert-markdown start:",
+            pdfInfo.wikiPdfPath,
+            "←",
+            pdfInfo.pdfPath,
+          );
+          appendBubble("system", "正在连接 FireFly Bridge…");
           await ensureFireFlyBridgeStarted();
+          appendBubble("system", "正在同步 PDF 到 llm-wiki/raw/pdf…");
           let wikiMirrorJustCopied = false;
           try {
             wikiMirrorJustCopied = await ensureWikiPdfMirrorIfMissing(pdfInfo);
@@ -1074,6 +1089,7 @@ export function registerLLMItemPaneSection() {
             );
             return;
           }
+          appendBubble("system", "正在从 PDF 生成 Markdown 并重建 RAG…");
           const result = await convertCurrentPdfToMarkdown({
             pdf_path: pdfInfo.pdfPath,
             pdf_dir: pdfInfo.pdfDir,
@@ -1081,6 +1097,10 @@ export function registerLLMItemPaneSection() {
             wiki_pdf_path: pdfInfo.wikiPdfPath,
             rebuild_rag: true,
           });
+          if (result && (result as any).ok === false) {
+            throw new Error(String((result as any).error || "convert-markdown 返回失败"));
+          }
+          ztoolkit.log("[llm-ui] convert-markdown done:", JSON.stringify(result));
           hasReceivedLiterature = true;
           (globalThis as any).__fireflyWikiPdfReceived = true;
           // Zotero 部分文档的 defaultView 无全局 CustomEvent，勿直接使用裸的 CustomEvent 标识符。
@@ -1104,10 +1124,13 @@ export function registerLLMItemPaneSection() {
           syncContextBar();
           const markdownPath = String((result as any)?.markdown_path || "").trim();
           const mdReason = String((result as any)?.reason || "").trim();
+          const mdConverted = Boolean((result as any)?.converted);
           const convertMsg =
             mdReason === "already_converted"
               ? `已有 Markdown，未从 PDF 重转${markdownPath ? `：${markdownPath}` : ""}`
-              : `Markdown 已就绪${markdownPath ? `：${markdownPath}` : ""}`;
+              : mdConverted
+                ? `已从 PDF 生成 Markdown${markdownPath ? `：${markdownPath}` : ""}`
+                : `Markdown 已就绪${markdownPath ? `：${markdownPath}` : ""}`;
           const ragPath = String((result as any)?.rag_path || "").trim();
           const ragChunks = Number((result as any)?.rag_chunk_count ?? 0);
           const ragReindexed = Boolean((result as any)?.rag_reindexed);
@@ -1126,15 +1149,32 @@ export function registerLLMItemPaneSection() {
           const mirrorNote = wikiMirrorJustCopied ? "已从 Zotero 补全 wiki 目录中的 PDF 副本。\n" : "";
           appendBubble("system", `${mirrorNote}${convertMsg}\n${ragLine}`);
         } catch (e) {
-          appendBubble("system", `Markdown 转换失败: ${String((e as any)?.message || e || "")}`);
+          const raw = String((e as any)?.message || e || "");
+          let detail = raw;
+          const jsonStart = raw.indexOf("{");
+          if (jsonStart >= 0) {
+            try {
+              const parsed = JSON.parse(raw.slice(jsonStart)) as { error?: string; error_log?: string };
+              if (parsed.error) {
+                detail = parsed.error;
+              }
+              if (parsed.error_log) {
+                detail += `\n详细日志: ${parsed.error_log}`;
+              }
+            } catch {
+              // keep raw message
+            }
+          }
+          appendBubble("system", `Markdown 转换失败: ${detail}`);
+          ztoolkit.log("[llm-ui] convert-markdown error:", raw);
         } finally {
           isConvertingLiterature = false;
           syncConvertButtonState();
           syncContextBar();
         }
       };
-      convertBtn.addEventListener("click", () => {
-        if (isSending || isConvertingLiterature) return;
+      bindPaneActionButton(convertBtn, () => {
+        if (isSending) return;
         void triggerCurrentPdfMarkdownConversion();
       });
       syncConvertButtonState();
@@ -1158,12 +1198,7 @@ export function registerLLMItemPaneSection() {
       thinkingStateWrap.addEventListener("mouseleave", () => {
         thinkingStateWrap.style.background = "transparent";
       });
-      const thinkingIcon = ownerDoc.createElement("img");
-      thinkingIcon.src = `${iconBase}/think.svg`;
-      thinkingIcon.alt = "wiki";
-      thinkingIcon.style.width = "18px";
-      thinkingIcon.style.height = "18px";
-      thinkingStateWrap.append(thinkingIcon);
+      appendToolIcon(thinkingStateWrap, `${iconBase}/think.svg`, "wiki", 18);
       leftActions.append(slashBtn, fontBtn, screenshotBtn, convertBtn, thinkingStateWrap);
 
       const sendBtn = ownerDoc.createElement("button");
@@ -1278,62 +1313,66 @@ export function registerLLMItemPaneSection() {
       syncSendButtonState(false);
 
       thinkingStateWrap.title = "通过本论文的 Markdown 整理 wiki（需已生成 raw/markdown）";
-      thinkingStateWrap.addEventListener("click", () => {
-        if (isSending || isConvertingLiterature || wikiIngestBusy) return;
-        void (async () => {
-          const pdfInfo = await getCurrentWikiPdfInfoForConversion();
-          if (!pdfInfo) {
-            appendBubble("system", "未找到当前文献 PDF，无法定位 raw/markdown。");
+      const triggerWikiIngestFromCurrentItem = async () => {
+        if (wikiIngestBusy) return;
+        wikiIngestBusy = true;
+        thinkingStateWrap.style.opacity = "0.55";
+        try {
+          appendBubble("system", "正在根据 Markdown 整理 wiki…");
+          const resolved = await resolveWikiPdfInfo({ preferredItem: item });
+          if (!resolved.ok) {
+            appendBubble("system", resolved.message);
             return;
           }
-          wikiIngestBusy = true;
-          thinkingStateWrap.style.opacity = "0.55";
+          const pdfInfo = resolved.data;
+          await ensureFireFlyBridgeStarted();
           try {
-            await ensureFireFlyBridgeStarted();
-            try {
-              await ensureWikiPdfMirrorIfMissing(pdfInfo);
-            } catch (syncErr) {
-              appendBubble(
-                "system",
-                `无法同步 PDF 到 llm-wiki/raw/pdf：${String((syncErr as any)?.message || syncErr || "")}`,
-              );
-              return;
-            }
-            const res = await triggerWikiIngestFromMarkdown({
-              pdf_path: pdfInfo.pdfPath,
-              pdf_dir: pdfInfo.pdfDir,
-              pdf_name: pdfInfo.pdfName,
-              wiki_pdf_path: pdfInfo.wikiPdfPath,
-            });
-            if (res.ok && res.detail === "written") {
-              const trunc = res.source_truncated ? "\n（原文过长已截断，仅以前部为据）" : "";
-              appendBubble("system", `Wiki 已写入：${res.wiki_path || ""}${trunc}`);
-            } else {
-              const hint =
-                res.detail === "markdown_missing"
-                  ? "尚无 Markdown，请先点击「Markdown→RAG」从 PDF 生成。"
-                  : res.detail === "no_pdf"
-                    ? "未找到 PDF。"
-                    : res.detail === "no_llm_wiki"
-                      ? "未在 workspace 旁找到 llm-wiki。"
-                      : res.detail === "markdown_outside_raw_tree"
-                        ? "Markdown 路径不在 raw/markdown 下。"
-                        : res.detail === "markdown_read_error"
-                          ? "无法读取 Markdown 文件。"
-                          : res.detail === "llm_error"
-                            ? "LLM 调用失败，请查看 FireFly 日志。"
-                            : res.detail === "empty_llm_output"
-                              ? "模型返回为空。"
-                              : res.detail || "未知错误";
-              appendBubble("system", `Wiki 整理未成功：${hint}`);
-            }
-          } catch (e) {
-            appendBubble("system", `Wiki 整理请求失败：${String((e as any)?.message || e || "")}`);
-          } finally {
-            wikiIngestBusy = false;
-            thinkingStateWrap.style.opacity = "1";
+            await ensureWikiPdfMirrorIfMissing(pdfInfo);
+          } catch (syncErr) {
+            appendBubble(
+              "system",
+              `无法同步 PDF 到 llm-wiki/raw/pdf：${String((syncErr as any)?.message || syncErr || "")}`,
+            );
+            return;
           }
-        })();
+          const res = await triggerWikiIngestFromMarkdown({
+            pdf_path: pdfInfo.pdfPath,
+            pdf_dir: pdfInfo.pdfDir,
+            pdf_name: pdfInfo.pdfName,
+            wiki_pdf_path: pdfInfo.wikiPdfPath,
+          });
+          if (res.ok && res.detail === "written") {
+            const trunc = res.source_truncated ? "\n（原文过长已截断，仅以前部为据）" : "";
+            appendBubble("system", `Wiki 已写入：${res.wiki_path || ""}${trunc}`);
+          } else {
+            const hint =
+              res.detail === "markdown_missing"
+                ? "尚无 Markdown，请先点击「Markdown→RAG」从 PDF 生成。"
+                : res.detail === "no_pdf"
+                  ? "未找到 PDF。"
+                  : res.detail === "no_llm_wiki"
+                    ? "未在 workspace 旁找到 llm-wiki。"
+                    : res.detail === "markdown_outside_raw_tree"
+                      ? "Markdown 路径不在 raw/markdown 下。"
+                      : res.detail === "markdown_read_error"
+                        ? "无法读取 Markdown 文件。"
+                        : res.detail === "llm_error"
+                          ? "LLM 调用失败，请查看 FireFly 日志。"
+                          : res.detail === "empty_llm_output"
+                            ? "模型返回为空。"
+                            : res.detail || "未知错误";
+            appendBubble("system", `Wiki 整理未成功：${hint}`);
+          }
+        } catch (e) {
+          appendBubble("system", `Wiki 整理请求失败：${String((e as any)?.message || e || "")}`);
+        } finally {
+          wikiIngestBusy = false;
+          thinkingStateWrap.style.opacity = "1";
+        }
+      };
+      bindPaneActionButton(thinkingStateWrap, () => {
+        if (isSending || isConvertingLiterature || wikiIngestBusy) return;
+        void triggerWikiIngestFromCurrentItem();
       });
 
       clearChatBtn.addEventListener("mousedown", (ev) => {
@@ -1542,8 +1581,10 @@ export function registerLLMItemPaneSection() {
           const baseMessage = contextPayload ? `${contextPayload}${message}` : message;
           let messageWithContext = baseMessage || (mediaPaths.length > 0 ? "[Image Context Attached]" : "");
           try {
-            const currentWikiPdfInfo = await getCurrentWikiPdfInfoForConversion();
-            const currentWikiPdfPath = String(currentWikiPdfInfo?.wikiPdfPath || "").trim();
+            const resolved = await resolveWikiPdfInfo({ preferredItem: item });
+            const currentWikiPdfPath = resolved.ok
+              ? String(resolved.data.wikiPdfPath || "").trim()
+              : "";
             if (currentWikiPdfPath) {
               messageWithContext = `[zotero_current_wiki_pdf_path=${currentWikiPdfPath}]\n${messageWithContext}`;
             }

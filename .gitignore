@@ -3,7 +3,7 @@
 .assets
 .docs
 .web
-.scaffold
+release-dist/
 
 # Monorepo subprojects (explicit)
 plugin/node_modules/

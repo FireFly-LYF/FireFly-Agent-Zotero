@@ -51,6 +51,8 @@ dependencies = [
     "jinja2>=3.1.0,<4.0.0",
     "dulwich>=0.22.0,<1.0.0",
     "filelock>=3.25.2",
+    "pymupdf>=1.25.0",
+    "pymupdf4llm>=0.0.17",
 ]
 
 [project.optional-dependencies]
@@ -78,6 +80,7 @@ langsmith = [
 ]
 pdf = [
     "pymupdf>=1.25.0",
+    "pymupdf4llm>=0.0.17",
 ]
 dev = [
     "pytest>=9.0.0,<10.0.0",
