@@ -2,6 +2,7 @@
 
 import difflib
 import mimetypes
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,10 @@ from typing import Any
 from firefly.agent.tools.base import Tool, tool_parameters
 from firefly.agent.tools.schema import BooleanSchema, IntegerSchema, StringSchema, tool_parameters_schema
 from firefly.agent.tools import file_state
-from firefly.utils.helpers import build_image_content_blocks, detect_image_mime
+from firefly.utils.helpers import build_image_content_blocks, detect_image_mime, is_tool_result_cache_path
+from firefly.agent.temp_workspace import register_agent_temp_file, validate_scratch_write_path
 from firefly.config.paths import get_media_dir
+from firefly.skills.markdown.scripts.rag_paths import llm_wiki_markdown_mirror_for_pdf
 
 
 def _resolve_path(
@@ -56,6 +59,12 @@ class _FsTool(Tool):
     def _resolve(self, path: str) -> Path:
         return _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
 
+    def _guard_scratch_write(self, fp: Path) -> str | None:
+        return validate_scratch_write_path(fp, self._workspace)
+
+    def _note_temp_write(self, fp: Path) -> None:
+        register_agent_temp_file(fp, self._workspace)
+
 
 # ---------------------------------------------------------------------------
 # 读取文件
@@ -92,6 +101,87 @@ def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
     return max(0, start - 1), min(end - 1, total - 1)
 
 
+_LINE_NUM_PREFIX = re.compile(r"^\d+\|\s")
+
+
+def _looks_numbered(lines: list[str]) -> bool:
+    """检测文本是否已由 read_file 加过行号前缀。"""
+    if not lines:
+        return False
+    sample = lines[: min(20, len(lines))]
+    numbered = sum(1 for line in sample if _LINE_NUM_PREFIX.match(line))
+    return numbered / len(sample) >= 0.5
+
+
+def _strip_line_number_prefix(line: str) -> str:
+    match = _LINE_NUM_PREFIX.match(line)
+    return line[match.end():] if match else line
+
+
+def _should_emit_plain_text(fp: Path, lines: list[str]) -> bool:
+    """工具结果缓存或已带行号的文件不再二次加行号。"""
+    return is_tool_result_cache_path(fp) or _looks_numbered(lines)
+
+
+def _format_text_read(
+    lines: list[str],
+    *,
+    offset: int,
+    limit: int | None,
+    default_limit: int,
+    max_chars: int,
+    plain: bool,
+) -> tuple[str, int, int]:
+    """按 offset/limit 截取文本并格式化输出。"""
+    total = len(lines)
+    if offset < 1:
+        offset = 1
+    if offset > total:
+        return f"Error: offset {offset} is beyond end of file ({total} lines)", offset, total
+
+    start = offset - 1
+    end = min(start + (limit or default_limit), total)
+    selected = lines[start:end]
+
+    if plain:
+        body = "\n".join(selected)
+    else:
+        body = "\n".join(f"{start + i + 1}| {line}" for i, line in enumerate(selected))
+
+    if len(body) > max_chars:
+        if plain:
+            trimmed: list[str] = []
+            chars = 0
+            for line in selected:
+                chars += len(line) + 1
+                if chars > max_chars:
+                    break
+                trimmed.append(line)
+            end = start + len(trimmed)
+            body = "\n".join(trimmed)
+        else:
+            trimmed_lines: list[str] = []
+            chars = 0
+            for i, line in enumerate(selected):
+                numbered = f"{start + i + 1}| {line}"
+                chars += len(numbered) + 1
+                if chars > max_chars:
+                    break
+                trimmed_lines.append(numbered)
+            end = start + len(trimmed_lines)
+            body = "\n".join(trimmed_lines)
+
+    if end < total:
+        suffix = (
+            f"\n\n(Showing lines {offset}-{end} of {total}. Use offset={end + 1} to continue.)"
+        )
+    else:
+        suffix = f"\n\n(End of file — {total} lines total)"
+    if plain:
+        suffix = f"\n\n(Raw text — line numbers omitted to avoid nested prefixes.){suffix}"
+    return body + suffix, end, total
+
+
 @tool_parameters(
     tool_parameters_schema(
         path=StringSchema("The file path to read"),
@@ -124,8 +214,13 @@ class ReadFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Read a file (text or image). Text output format: LINE_NUM|CONTENT. "
+            "Cached tool-result files (.firefly/tool-results/) return raw text without "
+            "line numbers to prevent nested prefixes. "
             "Images return visual content for analysis. "
-            "Use offset and limit for large files. "
+            "For llm-wiki literature, prefer the mirrored "
+            "backend/llm-wiki/raw/markdown/*.md (or [zotero_current_wiki_markdown_path=…]); "
+            "do not read raw/pdf/*.pdf when the .md mirror exists. "
+            "Use offset and limit for large files; use pages='1-5' only when no markdown mirror. "
             "Cannot read non-image binary files. "
             "Reads exceeding ~128K chars are truncated."
         )
@@ -151,9 +246,22 @@ class ReadFileTool(_FsTool):
             if not fp.is_file():
                 return f"Error: Not a file: {path}"
 
-            # PDF 支持
+            pdf_redirect_note = ""
             if fp.suffix.lower() == ".pdf":
-                return self._read_pdf(fp, pages)
+                md_mirror = llm_wiki_markdown_mirror_for_pdf(fp)
+                if md_mirror is not None:
+                    pdf_redirect_note = (
+                        f"(Redirected from PDF to llm-wiki markdown mirror: {md_mirror})\n"
+                    )
+                    fp = md_mirror
+                else:
+                    return self._read_pdf(fp, pages)
+
+            plain_cache = is_tool_result_cache_path(fp)
+            dedup_variant = "tool-result" if plain_cache else None
+            if file_state.is_unchanged(fp, offset=offset, limit=limit, variant=dedup_variant):
+                unchanged = f"[File unchanged since last read: {path}]"
+                return pdf_redirect_note + unchanged if pdf_redirect_note else unchanged
 
             raw = fp.read_bytes()
             if not raw:
@@ -163,50 +271,46 @@ class ReadFileTool(_FsTool):
             if mime and mime.startswith("image/"):
                 return build_image_content_blocks(raw, mime, str(fp), f"(Image file: {path})")
 
-            # 读取去重：路径+offset+limit 相同且 mtime 未变 -> 返回占位结果
-            if file_state.is_unchanged(fp, offset=offset, limit=limit):
-                return f"[File unchanged since last read: {path}]"
-
             try:
                 text_content = raw.decode("utf-8")
             except UnicodeDecodeError:
                 return f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). Only UTF-8 text and images are supported."
 
-            all_lines = text_content.splitlines()
-            total = len(all_lines)
+            raw_lines = text_content.splitlines()
+            plain = _should_emit_plain_text(fp, raw_lines)
+            all_lines = (
+                [_strip_line_number_prefix(line) for line in raw_lines]
+                if _looks_numbered(raw_lines)
+                else raw_lines
+            )
+            result, end, total = _format_text_read(
+                all_lines,
+                offset=offset,
+                limit=limit,
+                default_limit=self._DEFAULT_LIMIT,
+                max_chars=self._MAX_CHARS,
+                plain=plain,
+            )
+            if result.startswith("Error:"):
+                return result
 
-            if offset < 1:
-                offset = 1
-            if offset > total:
-                return f"Error: offset {offset} is beyond end of file ({total} lines)"
-
-            start = offset - 1
-            end = min(start + (limit or self._DEFAULT_LIMIT), total)
-            numbered = [f"{start + i + 1}| {line}" for i, line in enumerate(all_lines[start:end])]
-            result = "\n".join(numbered)
-
-            if len(result) > self._MAX_CHARS:
-                trimmed, chars = [], 0
-                for line in numbered:
-                    chars += len(line) + 1
-                    if chars > self._MAX_CHARS:
-                        break
-                    trimmed.append(line)
-                end = start + len(trimmed)
-                result = "\n".join(trimmed)
-
-            if end < total:
-                result += f"\n\n(Showing lines {offset}-{end} of {total}. Use offset={end + 1} to continue.)"
-            else:
-                result += f"\n\n(End of file — {total} lines total)"
-            file_state.record_read(fp, offset=offset, limit=limit)
-            return result
+            file_state.record_read(
+                fp,
+                offset=offset,
+                limit=limit,
+                variant=dedup_variant if plain_cache else None,
+            )
+            return pdf_redirect_note + result if pdf_redirect_note else result
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error reading file: {e}"
 
     def _read_pdf(self, fp: Path, pages: str | None) -> str:
+        pdf_variant = pages or f"__default__:{self._MAX_PDF_PAGES}"
+        if file_state.is_unchanged(fp, variant=pdf_variant):
+            return f"[File unchanged since last read: {fp}]"
+
         try:
             import fitz  # pymupdf
         except ImportError:
@@ -250,6 +354,7 @@ class ReadFileTool(_FsTool):
             result += f"\n\n(Showing pages {start + 1}-{end + 1} of {total_pages}. Use pages='{end + 2}-{min(end + 1 + self._MAX_PDF_PAGES, total_pages)}' to continue.)"
         if len(result) > self._MAX_CHARS:
             result = result[:self._MAX_CHARS] + "\n\n(PDF text truncated at ~128K chars)"
+        file_state.record_read(fp, variant=pdf_variant)
         return result
 
 
@@ -277,6 +382,7 @@ class WriteFileTool(_FsTool):
         return (
             "Write content to a file. Overwrites if the file already exists; "
             "creates parent directories as needed. "
+            "One-off scripts must go under temp/ (auto-deleted after the turn). "
             "For partial edits, prefer edit_file instead."
         )
 
@@ -287,9 +393,12 @@ class WriteFileTool(_FsTool):
             if content is None:
                 raise ValueError("Unknown content")
             fp = self._resolve(path)
+            if err := self._guard_scratch_write(fp):
+                return err
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             file_state.record_write(fp)
+            self._note_temp_write(fp)
             return f"Successfully wrote {len(content)} characters to {fp}"
         except PermissionError as e:
             return f"Error: {e}"
@@ -590,6 +699,7 @@ class EditFileTool(_FsTool):
         return (
             "Edit a file by replacing old_text with new_text. "
             "Tolerates minor whitespace/indentation differences and curly/straight quote mismatches. "
+            "One-off scripts must live under temp/ (auto-deleted after the turn). "
             "If old_text matches multiple times, you must provide more context "
             "or set replace_all=true. Shows a diff of the closest match on failure."
         )
@@ -617,6 +727,8 @@ class EditFileTool(_FsTool):
                 return "Error: This is a Jupyter notebook. Use the notebook_edit tool instead of edit_file."
 
             fp = self._resolve(path)
+            if err := self._guard_scratch_write(fp):
+                return err
 
             # 创建文件语义：old_text='' 且文件不存在 -> 创建
             if not fp.exists():
@@ -624,6 +736,7 @@ class EditFileTool(_FsTool):
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     fp.write_text(new_text, encoding="utf-8")
                     file_state.record_write(fp)
+                    self._note_temp_write(fp)
                     return f"Successfully created {fp}"
                 return self._file_not_found_msg(path, fp)
 
@@ -643,6 +756,7 @@ class EditFileTool(_FsTool):
                     return f"Error: Cannot create file — {path} already exists and is not empty."
                 fp.write_text(new_text, encoding="utf-8")
                 file_state.record_write(fp)
+                self._note_temp_write(fp)
                 return f"Successfully edited {fp}"
 
             # 编辑前读取检查
@@ -692,6 +806,7 @@ class EditFileTool(_FsTool):
 
             fp.write_bytes(new_content.encode("utf-8"))
             file_state.record_write(fp)
+            self._note_temp_write(fp)
             msg = f"Successfully edited {fp}"
             if warning:
                 msg = f"{warning}\n{msg}"

@@ -187,6 +187,15 @@ class AgentRunner:
         return injected_messages
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        from firefly.agent.temp_workspace import begin_agent_temp_turn, cleanup_agent_temp_turn
+
+        begin_agent_temp_turn()
+        try:
+            return await self._run(spec)
+        finally:
+            cleanup_agent_temp_turn(spec.workspace)
+
+    async def _run(self, spec: AgentRunSpec) -> AgentRunResult:
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
         final_content: str | None = None
@@ -608,6 +617,13 @@ class AgentRunner:
             iteration=context.iteration,
             messages=messages,
         )
+        logger.info(
+            "LLM request: session={} iteration={} model={} messages={}",
+            spec.session_key or "default",
+            context.iteration,
+            spec.model,
+            len(messages),
+        )
         kwargs = self._build_request_kwargs(
             spec,
             messages,
@@ -637,21 +653,25 @@ class AgentRunner:
         iteration: int,
         messages: list[dict[str, Any]],
     ) -> None:
-        """仅在 Zotero 会话打印发给 LLM 的完整上下文，便于后端调试。"""
+        """Zotero 会话：仅记录 LLM 请求摘要，避免 dump 全文阻塞事件循环。"""
         session_key = str(spec.session_key or "")
         if not session_key.startswith("zotero:"):
             return
-        payload = {
-            "session_key": session_key,
-            "iteration": iteration,
-            "model": spec.model,
-            "message_count": len(messages),
-            "messages": messages,
-            "tool_names": spec.tools.tool_names,
-        }
+        roles: dict[str, int] = {}
+        tool_chars = 0
+        for msg in messages:
+            role = str(msg.get("role") or "")
+            roles[role] = roles.get(role, 0) + 1
+            if role == "tool" and isinstance(msg.get("content"), str):
+                tool_chars += len(str(msg["content"]))
         logger.info(
-            "ZOTERO_LLM_CONTEXT\n{}",
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            "Zotero LLM request: session={} iteration={} model={} messages={} roles={} tool_chars={}",
+            session_key,
+            iteration,
+            spec.model,
+            len(messages),
+            roles,
+            tool_chars,
         )
 
     async def _request_finalization_retry(

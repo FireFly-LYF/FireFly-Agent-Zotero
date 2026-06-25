@@ -37,7 +37,7 @@ from rich.table import Table
 from rich.text import Text
 
 from firefly import __logo__, __version__
-from firefly.skills.markdown.scripts.rag_utils import retrieve_rag_chunks_with_chapter_expansion
+from firefly.skills.markdown.scripts.rag_paths import ensure_markdown_rag_index
 from firefly.skills.wiki.scripts.llm_wiki_paths import resolve_wiki_mirror_from_raw_pdf_path
 
 
@@ -53,7 +53,7 @@ class SafeFileHistory(FileHistory):
         safe = string.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
         super().store_string(safe)
 from firefly.cli.stream import StreamRenderer, ThinkingSpinner
-from firefly.config.paths import get_workspace_path, is_default_workspace
+from firefly.config.paths import get_workspace_path, get_workspace_temp_dir, is_default_workspace
 from firefly.config.schema import Config
 from firefly.utils.helpers import sync_workspace_templates
 from firefly.utils.restart import (
@@ -960,41 +960,48 @@ def agent(
     else:
         logger.disable("firefly")
 
-    # 在 assistant 输出前展示本轮实际发给 LLM 的 messages/tools/参数（含多轮工具循环的每次请求）
+    from firefly.config.cli_prefs import load_cli_prefs
+    from firefly.config.loader import get_config_path
+
+    show_llm_input = bool(load_cli_prefs(get_config_path()).get("show_llm_input"))
     _llm_input_use_interactive: list[bool] = [True]
+    on_llm_request_cb = None
 
-    async def _on_llm_request_display(payload: dict[str, Any]) -> None:
-        """展示发给 LLM 的快照；任意异常不得阻断推理。"""
-        title = "LLM 请求快照（默认整段脱敏；可在 user.json 的 llm_input_print 中分段打印）"
-        try:
-            body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        except Exception as exc:
-            logger.warning("LLM request display: JSON encode failed ({}), using repr fallback", exc)
-            body = repr(payload)[:120_000]
+    if show_llm_input:
+        async def _on_llm_request_display(payload: dict[str, Any]) -> None:
+            """展示发给 LLM 的快照；任意异常不得阻断推理。"""
+            title = "LLM 请求快照（默认整段脱敏；可在 user.json 的 llm_input_print 中分段打印）"
+            try:
+                body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+            except Exception as exc:
+                logger.warning("LLM request display: JSON encode failed ({}), using repr fallback", exc)
+                body = repr(payload)[:120_000]
 
-        def _print_plain() -> None:
-            console.print(f"\n[bold yellow]{title}[/bold yellow]")
-            console.print(body, style="dim", markup=False)
-            console.print()
+            def _print_plain() -> None:
+                console.print(f"\n[bold yellow]{title}[/bold yellow]")
+                console.print(body, style="dim", markup=False)
+                console.print()
 
-        if not _llm_input_use_interactive[0]:
-            _print_plain()
-            return
-        try:
-            def _write() -> None:
-                ansi = _render_interactive_ansi(
-                    lambda c: (
-                        c.print(),
-                        c.print(f"  [bold yellow]{title}[/bold yellow]"),
-                        c.print(body, style="dim", markup=False),
-                        c.print(),
+            if not _llm_input_use_interactive[0]:
+                _print_plain()
+                return
+            try:
+                def _write() -> None:
+                    ansi = _render_interactive_ansi(
+                        lambda c: (
+                            c.print(),
+                            c.print(f"  [bold yellow]{title}[/bold yellow]"),
+                            c.print(body, style="dim", markup=False),
+                            c.print(),
+                        )
                     )
-                )
-                print_formatted_text(ANSI(ansi), end="")
-            await run_in_terminal(_write)
-        except Exception as exc:
-            logger.warning("LLM request display: run_in_terminal failed ({}), using direct print", exc)
-            _print_plain()
+                    print_formatted_text(ANSI(ansi), end="")
+                await run_in_terminal(_write)
+            except Exception as exc:
+                logger.warning("LLM request display: run_in_terminal failed ({}), using direct print", exc)
+                _print_plain()
+
+        on_llm_request_cb = _on_llm_request_display
 
     agent_loop = AgentLoop(
         bus=bus,
@@ -1016,7 +1023,7 @@ def agent(
         unified_session=config.agents.defaults.unified_session,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
-        on_llm_request=_on_llm_request_display,
+        on_llm_request=on_llm_request_cb,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
@@ -1138,7 +1145,6 @@ def agent(
                 return f"{guidance}\n\n{content}"
 
             _WIKI_PDF_MARKER_RE = re.compile(r"\[zotero_current_wiki_pdf_path=(.+?)\]")
-            _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
             def _extract_current_wiki_pdf_path(content: str) -> str:
                 if not content:
@@ -1146,201 +1152,31 @@ def agent(
                 m = _WIKI_PDF_MARKER_RE.search(content)
                 return str(m.group(1)).strip() if m else ""
 
-            def _resolve_rag_path_from_pdf_marker(pdf_path: str) -> Path | None:
-                """根据插件发来的 wiki PDF 镜像路径，解析同结构的 raw/rag/*.jsonl。"""
+            def _inject_wiki_markdown_path_marker(content: str) -> str:
+                """在已有 wiki PDF marker 时补充对应的 raw/markdown 镜像路径。"""
+                if not content or "[zotero_current_wiki_markdown_path=" in content:
+                    return content
+                pdf_path = _extract_current_wiki_pdf_path(content)
                 if not pdf_path:
-                    return None
-                raw = str(pdf_path).strip().strip('"')
-                norm = raw.replace("\\", "/")
-                lowered = norm.lower()
-                marker = "raw/pdf/"
-                idx = lowered.find(marker)
-                if idx < 0:
-                    return None
-                head = norm[:idx].rstrip("/")
-                tail = norm[idx + len(marker) :].lstrip("/")
-                if not tail:
-                    return None
-                tail_parts = [p for p in tail.split("/") if p]
-                primary = Path(head)
-                for part in ("raw", "rag", *tail_parts):
-                    primary = primary / part
-                primary = primary.with_suffix(".jsonl")
-                try:
-                    if primary.is_file():
-                        return primary.resolve()
-                except Exception:
-                    if primary.is_file():
-                        return primary
+                    return content
+                from firefly.skills.markdown.scripts.rag_paths import llm_wiki_markdown_mirror_for_pdf
 
-                stem = Path(tail_parts[-1]).stem
-                rag_root = Path(head) / "raw" / "rag"
-                try:
-                    if rag_root.is_dir():
-                        matches = list(rag_root.rglob(f"{stem}.jsonl"))
-                        if len(matches) == 1:
-                            logger.info(
-                                "RAG jsonl resolved via basename fallback: {} -> {}",
-                                pdf_path,
-                                matches[0],
-                            )
-                            return matches[0].resolve()
-                        if len(matches) > 1:
-                            logger.warning(
-                                "Multiple RAG jsonl for stem {!r} under {}, skipping ambiguous fallback",
-                                stem,
-                                rag_root,
-                            )
-                except Exception as exc:
-                    logger.warning(
-                        "RAG basename fallback failed for {!r}: {}",
-                        pdf_path,
-                        exc,
-                    )
-
-                try:
-                    exists = primary.exists()
-                except Exception:
-                    exists = False
-                if not exists:
-                    logger.warning(
-                        "RAG jsonl not found for wiki pdf marker (primary {!r})",
-                        primary,
-                    )
-                return primary if exists else None
-
-            def _resolve_markdown_root_from_rag_path(rag_path: Path) -> Path | None:
-                text = str(rag_path)
-                lowered = text.lower().replace("\\", "/")
-                marker = "raw/rag/"
-                idx = lowered.find(marker)
-                if idx < 0:
-                    return None
-                head = text[:idx]
-                return Path(f"{head}raw/markdown")
-
-            def _rewrite_chunk_image_refs_for_multimodal(
-                chunk_text: str, rec: dict[str, Any], rag_path: Path
-            ) -> str:
-                """把 chunk 中 markdown 图片引用改为绝对本地路径，供上游按原位注入图片。"""
-                if not chunk_text or "![" not in chunk_text:
-                    return chunk_text
-                source_markdown = str(rec.get("source_markdown", "") or "").strip()
-                if not source_markdown:
-                    return chunk_text
-                markdown_root = _resolve_markdown_root_from_rag_path(rag_path)
-                if not markdown_root:
-                    return chunk_text
-                md_path = (markdown_root / source_markdown).resolve()
-                md_parent = md_path.parent
-
-                def _replace(match: re.Match[str]) -> str:
-                    raw_ref = str(match.group(1) or "").strip().strip("<>")
-                    # 兼容 markdown title：![alt](path "title")
-                    if " " in raw_ref and not Path(raw_ref).exists():
-                        raw_ref = raw_ref.split(" ", 1)[0].strip()
-                    if not raw_ref:
-                        return match.group(0)
-                    ref_path = Path(raw_ref).expanduser()
-                    candidate = ref_path if ref_path.is_absolute() else (md_parent / ref_path).resolve()
-                    if not candidate.is_file():
-                        return match.group(0)
-                    return match.group(0).replace(match.group(1), str(candidate))
-
-                return _MARKDOWN_IMAGE_RE.sub(_replace, chunk_text)
-
-            def _tokenize_query(text: str) -> list[str]:
-                # 支持中英文混合：中文按连续片段，英文数字按单词。
-                return [
-                    tok.lower()
-                    for tok in re.findall(r"[\u4e00-\u9fff]{1,}|[A-Za-z0-9_]{2,}", text or "")
-                    if tok
-                ]
-
-            def _should_inject_rag(content: str) -> bool:
-                """仅在文献相关问题里注入 RAG，避免闲聊/泛问题触发检索。"""
-                if not content:
-                    return False
-                text = str(content).strip()
-                if not text:
-                    return False
-                # 移除 marker 后再做语义判断，避免 marker 本身干扰。
-                lowered_naked = re.sub(r"\[zotero_current_[^\]]+\]", " ", text.lower())
-                lowered_naked = re.sub(r"\s+", " ", lowered_naked).strip()
-                if not lowered_naked:
-                    return False
-
-                # 明确无关的常见闲聊短句，直接不触发（即便带了 wiki pdf marker）。
-                off_topic_phrases = (
-                    "你好",
-                    "hi",
-                    "hello",
-                    "早上好",
-                    "晚上好",
-                    "在吗",
-                    "谢谢",
-                    "多谢",
-                    "天气",
-                    "吃什么",
-                    "讲个笑话",
-                    "今天几号",
-                    "几点了",
-                )
-                if len(lowered_naked) <= 32 and any(p in lowered_naked for p in off_topic_phrases):
-                    return False
-
-                # 插件已写入当前文献路径时默认检索；否则「分析 4.2 节」「推导公式」等短技术问无法命中下方关键词。
-                if re.search(r"\[zotero_current_wiki_pdf_path=", text):
-                    return True
-
-                lowered = lowered_naked
-
-                literature_keywords = (
-                    "论文",
-                    "文献",
-                    "article",
-                    "paper",
-                    "preprint",
-                    "arxiv",
-                    "doi",
-                    "pdf",
-                    "摘要",
-                    "abstract",
-                    "引言",
-                    "introduction",
-                    "方法",
-                    "method",
-                    "实验",
-                    "result",
-                    "结果",
-                    "结论",
-                    "conclusion",
-                    "贡献",
-                    "局限",
-                    "参考文献",
-                    "citation",
-                    "附录",
-                    "图 ",
-                    "表 ",
-                )
-                if any(k in lowered for k in literature_keywords):
-                    return True
-
-                # 指代当前打开文献/段落的问题，也视为文献相关。
-                reference_patterns = (
-                    r"(这篇|该文|本文|文中|这份|这个)\s*(论文|文献|pdf|文章)?",
-                    r"(这一段|这段|这一节|本节|上文|下文|上面这段|下面这段)",
-                    r"(作者|研究者)\s*(认为|提出|怎么做|如何做)",
-                )
-                return any(re.search(pat, lowered) for pat in reference_patterns)
-
-            def _retrieve_local_rag_chunks(query: str, rag_jsonl_path: Path, top_k: int = 12) -> list[dict[str, Any]]:
-                return retrieve_rag_chunks_with_chapter_expansion(query, rag_jsonl_path, top_k=top_k)
+                md = llm_wiki_markdown_mirror_for_pdf(Path(pdf_path))
+                if md is None:
+                    return content
+                marker = f"[zotero_current_wiki_markdown_path={md}]"
+                if marker in content:
+                    return content
+                m = _WIKI_PDF_MARKER_RE.search(content)
+                if m:
+                    insert_at = m.end()
+                    return content[:insert_at] + f"\n{marker}" + content[insert_at:]
+                return f"{marker}\n\n{content}"
 
             _MAX_WIKI_CONTEXT_CHARS = 32000
 
             def _inject_wiki_page_context(content: str) -> str:
-                """若当前文献已有镜像 wiki 页，将其插在条目提示之后、RAG 检索片段之前。"""
+                """若当前文献已有镜像 wiki 页，将其插在条目提示之后。"""
                 if not content or "[Wiki Page Context]" in content:
                     return content
                 pdf_path = _extract_current_wiki_pdf_path(content)
@@ -1373,7 +1209,7 @@ def agent(
                 block_lines = [
                     "[Wiki Page Context]",
                     "该条目在 llm-wiki 下已有整理页（与 raw/markdown 目录镜像；规范见 AGENTS.md）。"
-                    "可作主题结构与要点导航；具体数值与实验细节请与下方 RAG 片段或原文核对。",
+                    "可作主题结构与要点导航；具体数值与实验细节请用 rag_search 或原文核对。",
                     f"path（相对 llm-wiki 根）: {rel_display}",
                 ]
                 if truncated:
@@ -1381,61 +1217,11 @@ def agent(
                 block_lines.extend(["---", body.rstrip(), "[/Wiki Page Context]"])
                 return f"{chr(10).join(block_lines)}\n\n{content}"
 
-            def _inject_rag_context(content: str) -> str:
-                if not content:
-                    return content
-                if "[RAG Context]" in content:
-                    return content
-                if not _should_inject_rag(content):
-                    return content
-                pdf_path = _extract_current_wiki_pdf_path(content)
-                if not pdf_path:
-                    return content
-                rag_path = _resolve_rag_path_from_pdf_marker(pdf_path)
-                if not rag_path:
-                    return content
-                chunks = _retrieve_local_rag_chunks(content, rag_path)
-                if not chunks:
-                    return content
-                block_lines = [
-                    "[RAG Context]",
-                    f"source: {rag_path}",
-                    "以下片段来自当前打开文献的本地 RAG 检索（章节名优先匹配；若匹配到子章节如 4.3，则召回整个父章节 4；按 chunk_index 文档顺序排列）：",
-                    "作答约束：回答用户问题时必须以上述片段为主要依据。若用户点名章节号（如 4.2、第三节），优先采信各行「section=[…]」与该节匹配的片段中的实验设定、指标与结论；不要用摘要/引言里的泛泛概括代替该节正文。若片段中确实没有相关信息，请写明依据不足，勿编造实验细节。",
-                    "重要：RAG 识别出的公式、符号、上下标可能存在 OCR/解析误差。请先校正并优化公式表达，再给出答案，不要逐字照搬原片段。",
-                    "公式输出格式要求：请优先使用标准 LaTeX；独立公式单独成行并使用 $$...$$，行内公式使用 $...$；变量下标/上标请使用规范写法（如 f_{g,l}, p_{opt}）。",
-                    "用户可见回答中禁止出现 RAG 内部编号式套话，例如「从 chunk 1」「从第 N 个片段的…部分可知」「从 chunk 1 的“算法性能比较”部分可知」等；"
-                    "用自然语言直接陈述结论与依据（必要时用章节/小节主题指代），不要提 chunk、片段序号或引号内小节名作为机械出处标签。",
-                ]
-                for i, rec in enumerate(chunks, start=1):
-                    txt = str(rec.get("text", "") or "").strip()
-                    txt = _rewrite_chunk_image_refs_for_multimodal(txt, rec, rag_path)
-                    if len(txt) > 900:
-                        txt = txt[:900] + " ..."
-                    section_path = str(rec.get("section_path", "") or "").strip()
-                    section_info = f" section=[{section_path}]" if section_path else ""
-                    block_lines.append(f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}{section_info}) ---")
-                    block_lines.append(txt)
-                block_lines.append(
-                    "— 以上即本轮注入的检索材料。回答下面用户消息时，须与上述各 chunk 的 section 与正文逐条对照；"
-                    "禁止用「本文/作者提出/仿真实验表明…」等不限定出处的全文式套话，除非检索片段中确有相同表述。 —"
-                )
-                block_lines.append("[/RAG Context]")
-                assembled = f"{chr(10).join(block_lines)}\n\n{content}"
-                return (
-                    f"{assembled}\n\n"
-                    "----\n"
-                    "【RAG 再确认】生成回复前请再次查阅紧邻上方的 [RAG Context]；"
-                    "凡涉及文献事实与实验结论，只能据此片段陈述；片段未出现的信息须写明「检索片段未提及」，勿凭常识杜撰。"
-                    "勿在面向用户的正文中写「从 chunk …」「从第几个片段…可知」等暴露检索结构的句子。"
-                )
-
             def _cache_zotero_media(media_paths: list[str]) -> list[str]:
                 """把前端传来的图片缓存到 workspace/temp，返回可读路径列表。"""
                 if not media_paths:
                     return []
-                temp_dir = config.workspace_path / "temp"
-                temp_dir.mkdir(parents=True, exist_ok=True)
+                temp_dir = get_workspace_temp_dir(config.workspace_path)
                 cached: list[str] = []
                 for raw in media_paths:
                     p = Path(str(raw)).expanduser()
@@ -1626,51 +1412,8 @@ def agent(
                             return _resolve_markdown_path(sync_intent)
                     return _resolve_markdown_path(source_pdf)
 
-                def _resolve_rag_jsonl_from_markdown(markdown_path: Path) -> Path:
-                    """与 llm-wiki 目录约定一致：raw/markdown 下 .md 对应 raw/rag 下同相对路径 .jsonl。"""
-                    text = str(markdown_path)
-                    marker = "raw\\markdown\\"
-                    marker_alt = "raw/markdown/"
-                    lowered = text.lower()
-                    idx = lowered.find(marker)
-                    if idx < 0:
-                        idx = lowered.find(marker_alt)
-                    if idx >= 0:
-                        head = text[:idx]
-                        tail = text[idx + len(marker) :] if lowered.find(marker) >= 0 else text[idx + len(marker_alt) :]
-                        rag_root = Path(f"{head}raw/rag")
-                        return (rag_root / tail).with_suffix(".jsonl")
-                    return markdown_path.with_suffix(".jsonl")
-
                 async def _ensure_markdown_rag_index(markdown_path: Path) -> dict[str, Any]:
-                    md = markdown_path.expanduser().resolve()
-                    if not md.is_file():
-                        raise FileNotFoundError(f"markdown not found for rag: {md}")
-                    rag_path = _resolve_rag_jsonl_from_markdown(md)
-                    try:
-                        rag_resolved = rag_path.expanduser().resolve()
-                    except Exception:
-                        rag_resolved = rag_path.expanduser()
-                    had_prior_rag_index = rag_resolved.is_file()
-                    # 进程内调用切片逻辑，与当前 firefly 包版本一致（避免子进程读到另一套安装路径下的旧脚本）。
-                    from firefly.config.cli_prefs import get_markdown_rag_prefs
-                    from firefly.config.loader import get_config_path as _cfg_path_for_rag
-                    from firefly.skills.markdown.scripts.markdown_to_rag import convert_one as _md_to_rag
-
-                    _mr = get_markdown_rag_prefs(_cfg_path_for_rag())
-                    _max_c = max(200, int(_mr["max_chars"]))
-
-                    def _run_slice() -> dict[str, object]:
-                        return _md_to_rag(md, rag_resolved, _max_c)
-
-                    conv = await asyncio.to_thread(_run_slice)
-                    chunk_count = int(conv.get("chunk_count") or 0)
-                    return {
-                        "rag_path": str(rag_resolved),
-                        "rag_chunk_count": chunk_count,
-                        "rag_reindexed": True,
-                        "had_prior_rag_index": had_prior_rag_index,
-                    }
+                    return await asyncio.to_thread(ensure_markdown_rag_index, markdown_path)
 
                 _PDF_CONVERT_TIMEOUT_SEC = 1800
                 _pdf_convert_lock = asyncio.Lock()
@@ -1913,8 +1656,8 @@ def agent(
                     media_paths = [str(p).strip() for p in media_paths if str(p).strip()]
                     cached_media = _cache_zotero_media(media_paths)
                     patched = _inject_zotero_item_context(content, override or session_id)
+                    patched = _inject_wiki_markdown_path_marker(patched)
                     patched = _inject_wiki_page_context(patched)
-                    patched = _inject_rag_context(patched)
                     patched = _zotero_append_query_reminder(patched, content)
                     lit = _literature_title_from_bridge_body(body)
                     await inbound_from_zotero.put({
@@ -1946,8 +1689,8 @@ def agent(
                     else:
                         current_channel, current_chat_id = "cli", source_session
                     patched_content = _inject_zotero_item_context(content, source_session)
+                    patched_content = _inject_wiki_markdown_path_marker(patched_content)
                     patched_content = _inject_wiki_page_context(patched_content)
-                    patched_content = _inject_rag_context(patched_content)
                     patched_content = _zotero_append_query_reminder(patched_content, content)
                     stream_lit = _literature_title_from_bridge_body(body)
 
@@ -2306,8 +2049,8 @@ def agent(
                         else:
                             current_channel, current_chat_id = "cli", source_session
                         patched_command = _inject_zotero_item_context(command, source_session)
+                        patched_command = _inject_wiki_markdown_path_marker(patched_command)
                         patched_command = _inject_wiki_page_context(patched_command)
-                        patched_command = _inject_rag_context(patched_command)
                         patched_command = _zotero_append_query_reminder(patched_command, command)
 
                         inbound_meta: dict[str, Any] = {"_wants_stream": True, "_source": source}

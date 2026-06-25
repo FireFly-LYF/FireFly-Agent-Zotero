@@ -31,5 +31,9 @@ python firefly/skills/zotero/scripts/zotero_literature_reader.py --query "attent
 
 - 先阅读 `fields`（标题、作者、年份、DOI 等）
 - 再结合 `notes` 与 `annotations`
-- 需要全文证据时使用 `--include-storage-text`
+- 需要全文证据时：
+  1. 优先 `read_file` **`backend/llm-wiki/raw/markdown/…/*.md`**（或消息中的 `[zotero_current_wiki_markdown_path=…]`）
+  2. 或用 `zotero_read_item --include-storage-text`（内部同样 markdown → pdf → storage）
+  3. 章节检索用 **`rag_search`**，不要用 `read_file` 直接读 `raw/pdf`
+- **不要**对已有 markdown 镜像的文献使用 `read_file` 读 PDF
 - 在回复中优先给出结构化结论，再给关键证据片段

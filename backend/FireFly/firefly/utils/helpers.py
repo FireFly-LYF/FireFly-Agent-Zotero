@@ -83,6 +83,21 @@ _TOOL_RESULTS_DIR = ".firefly/tool-results"
 _TOOL_RESULT_RETENTION_SECS = 7 * 24 * 60 * 60
 _TOOL_RESULT_MAX_BUCKETS = 32
 
+
+def is_tool_result_cache_path(path: str | Path) -> bool:
+    """Return True when *path* lives under the persisted tool-result cache."""
+    try:
+        parts = Path(path).resolve().parts
+    except OSError:
+        parts = Path(path).parts
+    if "tool-results" not in parts:
+        return False
+    try:
+        idx = parts.index("tool-results")
+    except ValueError:
+        return False
+    return idx > 0 and parts[idx - 1] == ".firefly"
+
 def safe_filename(name: str) -> str:
     """Replace unsafe path characters with underscores."""
     return _UNSAFE_CHARS.sub("_", name).strip()

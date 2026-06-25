@@ -9,8 +9,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, TypeVar
 
 from firefly.agent.tools.filesystem import ListDirTool, _FsTool
+from firefly.utils.helpers import is_tool_result_cache_path
 
 _DEFAULT_HEAD_LIMIT = 250
+_MAX_CONTEXT_LINES = 20
+_PDF_PAGE_MARKER = re.compile(r"^--- Page \d+ ---", re.MULTILINE)
+_HYPHENATED_LINE_BREAK = re.compile(r"(\w)-\n(\w)")
 T = TypeVar("T")
 _TYPE_GLOB_MAP = {
     "py": ("*.py", "*.pyi"),
@@ -34,6 +38,24 @@ _TYPE_GLOB_MAP = {
     "html": ("*.html", "*.htm"),
     "css": ("*.css", "*.scss", "*.sass"),
 }
+
+
+def _normalize_pdf_extract(content: str) -> str:
+    """Merge common PDF line-break hyphenation so section titles stay searchable."""
+    return _HYPHENATED_LINE_BREAK.sub(r"\1\2", content)
+
+
+def _looks_like_pdf_extract(content: str) -> bool:
+    return bool(_PDF_PAGE_MARKER.search(content))
+
+
+def _pdf_search_hint() -> str:
+    return (
+        "(Hint: PDF extracts may split words across lines and omit labels like 'Abstract'. "
+        "Try case_insensitive=true, fixed_strings=true, or patterns such as "
+        "'INTRODUCTION', 'CONCLUSION', or 'REFERENCES'. "
+        "For PDFs, prefer read_file(path, pages='21-25') over grep.)"
+    )
 
 
 def _normalize_pattern(pattern: str) -> str:
@@ -264,9 +286,20 @@ class GrepTool(_SearchTool):
         return (
             "Search file contents with a regex pattern. "
             "Default output_mode is files_with_matches (file paths only); "
-            "use content mode for matching lines with context. "
+            "use content mode for matching lines with context (max 20 lines before/after; "
+            "larger values are clamped automatically). "
+            "PDF extracts and tool-result cache files are normalized for hyphenated line breaks. "
             "Skips binary and files >2 MB. Supports glob/type filtering."
         )
+
+    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        cast = super().cast_params(params)
+        for key in ("context_before", "context_after"):
+            value = cast.get(key)
+            if isinstance(value, int) and value > _MAX_CONTEXT_LINES:
+                cast[f"__requested_{key}"] = value
+                cast[key] = _MAX_CONTEXT_LINES
+        return cast
 
     @property
     def read_only(self) -> bool:
@@ -394,6 +427,14 @@ class GrepTool(_SearchTool):
         **kwargs: Any,
     ) -> str:
         try:
+            clamp_notes: list[str] = []
+            for key in ("context_before", "context_after"):
+                requested = kwargs.pop(f"__requested_{key}", None)
+                if isinstance(requested, int) and requested > _MAX_CONTEXT_LINES:
+                    clamp_notes.append(
+                        f"{key} clamped from {requested} to {_MAX_CONTEXT_LINES}"
+                    )
+
             target = self._resolve(path or ".")
             if not target.exists():
                 return f"Error: Path not found: {path}"
@@ -426,6 +467,7 @@ class GrepTool(_SearchTool):
             counts: dict[str, int] = {}
             file_mtimes: dict[str, float] = {}
             root = target if target.is_dir() else target.parent
+            saw_pdf_extract = False
 
             for file_path in self._iter_files(target):
                 rel_path = file_path.relative_to(root).as_posix()
@@ -450,6 +492,10 @@ class GrepTool(_SearchTool):
                 except UnicodeDecodeError:
                     skipped_binary += 1
                     continue
+
+                if _looks_like_pdf_extract(content) or is_tool_result_cache_path(file_path):
+                    saw_pdf_extract = True
+                    content = _normalize_pdf_extract(content)
 
                 lines = content.splitlines()
                 display_path = self._display_path(file_path, root)
@@ -546,6 +592,13 @@ class GrepTool(_SearchTool):
                 notes.append(
                     f"(total matches: {sum(counts.values())} in {len(counts)} files)"
                 )
+            notes.extend(clamp_notes)
+            if saw_pdf_extract and (
+                (output_mode == "content" and not blocks)
+                or (output_mode == "files_with_matches" and not matching_files)
+                or (output_mode == "count" and not counts)
+            ):
+                notes.append(_pdf_search_hint())
             if notes:
                 result += "\n\n" + "\n".join(notes)
             return result

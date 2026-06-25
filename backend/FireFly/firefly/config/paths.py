@@ -40,6 +40,11 @@ def get_workspace_path(workspace: str | None = None) -> Path:
     return ensure_dir(path)
 
 
+def get_workspace_temp_dir(workspace: str | Path | None = None) -> Path:
+    """Return ``workspace/temp`` for agent scratch files and bridge media cache."""
+    return ensure_dir(get_workspace_path(str(workspace) if workspace is not None else None) / "temp")
+
+
 def is_default_workspace(workspace: str | Path | None) -> bool:
     """Return whether a workspace resolves to firefly's default workspace path."""
     current = Path(workspace).expanduser() if workspace is not None else resolve_default_base_dir() / "workspace"

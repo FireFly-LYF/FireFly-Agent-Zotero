@@ -138,6 +138,53 @@ class TestReadPdf:
         assert "Error" in result
         assert "not found" in result
 
+    @pytest.mark.asyncio
+    async def test_pdf_second_read_returns_unchanged_stub(self, tool, tmp_path):
+        fitz = pytest.importorskip("fitz")
+        pdf_path = tmp_path / "dedup.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Dedup PDF")
+        doc.save(str(pdf_path))
+        doc.close()
+
+        first = await tool.execute(path=str(pdf_path))
+        assert "Dedup PDF" in first
+        second = await tool.execute(path=str(pdf_path))
+        assert "unchanged" in second.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tool-result cache / nested line numbers
+# ---------------------------------------------------------------------------
+
+class TestReadToolResultCache:
+
+    @pytest.fixture()
+    def tool(self, tmp_path):
+        return ReadFileTool(workspace=tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_tool_result_cache_has_no_line_numbers(self, tool, tmp_path):
+        cache_dir = tmp_path / ".firefly" / "tool-results" / "session"
+        cache_dir.mkdir(parents=True)
+        cache_file = cache_dir / "call_abc.txt"
+        cache_file.write_text("--- Page 1 ---\nHello PDF\nLine two\n", encoding="utf-8")
+
+        result = await tool.execute(path=str(cache_file))
+        assert "1| 1|" not in result
+        assert "Hello PDF" in result
+        assert "line numbers omitted" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_numbered_file_is_not_double_numbered(self, tool, tmp_path):
+        f = tmp_path / "numbered.txt"
+        f.write_text("1| alpha\n2| beta\n", encoding="utf-8")
+        result = await tool.execute(path=str(f))
+        assert "1| 1|" not in result
+        assert "alpha" in result
+        assert "beta" in result
+
 
 # ---------------------------------------------------------------------------
 # Device path blacklist

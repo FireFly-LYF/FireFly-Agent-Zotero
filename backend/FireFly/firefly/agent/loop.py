@@ -47,14 +47,35 @@ if TYPE_CHECKING:
 UNIFIED_SESSION_KEY = "unified:default"
 
 # Zotero 面板轮次多时，不宜把全部未固化消息都塞进 LLM（虽仍有 runner 的 token 裁剪，
-# 但条数过多时容易在预算内挤进多轮旧话题，使模型延续无关上下文）。
+# Zotero 面板：限制送入 LLM 的历史 tool 结果体积，避免超大 exec 输出拖慢/卡死请求。
 ZOTERO_LLM_HISTORY_MAX_MESSAGES = 32
+ZOTERO_HISTORY_TOOL_MAX_CHARS = 3_000
+ZOTERO_PERSISTED_TOOL_MAX_CHARS = 4_000
 
 
 def _llm_history_max_messages_for_channel(channel: str) -> int:
     if channel == "zotero":
         return ZOTERO_LLM_HISTORY_MAX_MESSAGES
     return 0
+
+
+def _sanitize_history_for_llm(
+    history: list[dict[str, Any]],
+    *,
+    channel: str,
+) -> list[dict[str, Any]]:
+    """截断历史 tool 结果，降低 Zotero 长会话下的 LLM 延迟。"""
+    if channel != "zotero" or ZOTERO_HISTORY_TOOL_MAX_CHARS <= 0:
+        return history
+    out: list[dict[str, Any]] = []
+    for raw in history:
+        msg = dict(raw)
+        if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
+            content = str(msg["content"])
+            if len(content) > ZOTERO_HISTORY_TOOL_MAX_CHARS:
+                msg["content"] = truncate_text_fn(content, ZOTERO_HISTORY_TOOL_MAX_CHARS)
+        out.append(msg)
+    return out
 
 
 def _coerce_literature_title_from_metadata(metadata: dict[str, Any] | None) -> str | None:
@@ -329,6 +350,18 @@ class AgentLoop:
                 WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy)
             )
             self.tools.register(WebFetchTool(proxy=self.web_config.proxy))
+        from firefly.agent.tools.rag import RagIndexTool, RagSearchTool
+        from firefly.agent.tools.zotero import ZoteroReadItemTool, ZoteroSearchTool
+
+        zotero_data_dir = os.environ.get("ZOTERO_DATA_DIR", "").strip() or None
+        self.tools.register(
+            ZoteroReadItemTool(data_dir=zotero_data_dir, workspace=self.workspace)
+        )
+        self.tools.register(
+            ZoteroSearchTool(data_dir=zotero_data_dir, workspace=self.workspace)
+        )
+        self.tools.register(RagSearchTool())
+        self.tools.register(RagIndexTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
@@ -698,8 +731,6 @@ class AgentLoop:
                 self.sessions.save(session)
 
             session, pending = self.auto_compact.prepare_session(session, key)
-
-            await self.consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(
                 max_messages=_llm_history_max_messages_for_channel(channel),
@@ -708,7 +739,7 @@ class AgentLoop:
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
 
             messages = self.context.build_messages(
-                history=history,
+                history=_sanitize_history_for_llm(history, channel=channel),
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 session_summary=pending,
                 current_role=current_role,
@@ -746,8 +777,6 @@ class AgentLoop:
         if result := await self.commands.dispatch(ctx):
             return result
 
-        await self.consolidator.maybe_consolidate_by_tokens(session)
-
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -759,12 +788,20 @@ class AgentLoop:
         )
 
         initial_messages = self.context.build_messages(
-            history=history,
+            history=_sanitize_history_for_llm(history, channel=msg.channel),
             current_message=msg.content,
             session_summary=pending,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+        )
+
+        logger.info(
+            "Starting agent loop for {}:{} (history_msgs={}, session_msgs={})",
+            msg.channel,
+            msg.chat_id,
+            len(history),
+            len(session.messages),
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -904,8 +941,13 @@ class AgentLoop:
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
             if role == "tool":
-                if isinstance(content, str) and len(content) > self.max_tool_result_chars:
-                    entry["content"] = truncate_text_fn(content, self.max_tool_result_chars)
+                persist_cap = (
+                    ZOTERO_PERSISTED_TOOL_MAX_CHARS
+                    if literature_title
+                    else self.max_tool_result_chars
+                )
+                if isinstance(content, str) and len(content) > persist_cap:
+                    entry["content"] = truncate_text_fn(content, persist_cap)
                 elif isinstance(content, list):
                     filtered = self._sanitize_persisted_blocks(content, should_truncate_text=True)
                     if not filtered:

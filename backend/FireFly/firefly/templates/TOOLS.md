@@ -3,12 +3,18 @@
 工具签名会通过函数调用自动提供。
 本文件记录不那么直观的限制与使用模式。
 
+## write_file / edit_file — 临时脚本
+
+- 一次性脚本（`.py`、`.sh` 等）**只能**写在 `temp/` 下（相对工作区根目录）
+- 本轮对话结束后会自动删除 `temp/` 中 agent 生成的文件（`zotero-*` 桥接缓存除外）
+- 持久自定义技能请放在 `skills/`
+
 ## exec — 安全限制
 
 - 命令有可配置超时（默认 60 秒）
 - 危险命令会被拦截（如 rm -rf、格式化、dd、shutdown 等）
 - 输出最多保留 10,000 个字符
-- 可通过 `restrictToWorkspace` 将文件访问限制在工作区内
+- 一次性脚本请写在 `temp/` 下；`python -c` 在 Windows 会落到 `temp/.exec-cache/` 并在命令结束后删除
 
 ## glob — 文件发现
 

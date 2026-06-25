@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,105 @@ from loguru import logger
 from firefly.agent.tools.base import Tool, tool_parameters
 from firefly.agent.tools.sandbox import wrap_command
 from firefly.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
+from firefly.agent.temp_workspace import get_exec_cache_dir, remove_agent_temp_file
 from firefly.config.paths import get_media_dir
 
 _IS_WINDOWS = sys.platform == "win32"
+_PYTHON_C_RE = re.compile(
+    r"^(?P<exe>python(?:3(?:\.\d+)?)?|py)\s+-c\s+(?P<code>.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_WIN_QUOTED = r'(?:"([^"]*)"|\'([^\']*)\'|(\S+))'
+
+
+def _first_group(match: re.Match[str]) -> str:
+    return next(group for group in match.groups() if group is not None)
+
+
+def _powershell_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _unwrap_shell_string(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        inner = text[1:-1]
+        return inner.replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\")
+    return text
+
+
+def _rewrite_windows_mkdir(command: str) -> str | None:
+    cmd = command.strip()
+    mkdir_match = re.match(rf"^mkdir\s+(?:-p\s+)?{_WIN_QUOTED}\s*$", cmd, re.IGNORECASE)
+    if mkdir_match:
+        path = _first_group(mkdir_match)
+        ps_path = _powershell_single_quote(path)
+        return (
+            "powershell -NoProfile -NonInteractive -Command "
+            f"New-Item -ItemType Directory -Force -Path {ps_path}"
+        )
+
+    if_not_exist = re.match(
+        rf"^if\s+not\s+exist\s+{_WIN_QUOTED}\s+mkdir\s+{_WIN_QUOTED}\s*$",
+        cmd,
+        re.IGNORECASE,
+    )
+    if if_not_exist:
+        path = _first_group(if_not_exist)
+        ps_path = _powershell_single_quote(path)
+        return (
+            "powershell -NoProfile -NonInteractive -Command "
+            f"if (-not (Test-Path -LiteralPath {ps_path})) "
+            f"{{ New-Item -ItemType Directory -Force -Path {ps_path} }}"
+        )
+    return None
+
+
+def _rewrite_windows_type_findstr(command: str) -> str | None:
+    cmd = command.strip()
+    type_findstr = re.match(
+        rf"^(?:chcp\s+\d+\s*&&\s*)?type\s+{_WIN_QUOTED}\s*\|\s*findstr(.+)$",
+        cmd,
+        re.IGNORECASE,
+    )
+    if not type_findstr:
+        return None
+    path = _first_group(type_findstr)
+    findstr_args = type_findstr.group(4).strip()
+    ps_path = _powershell_single_quote(path)
+    return (
+        "powershell -NoProfile -NonInteractive -Command "
+        f"Get-Content -LiteralPath {ps_path} -Encoding UTF8 | Select-String {findstr_args}"
+    )
+
+
+def preprocess_windows_command(command: str) -> str:
+    """Rewrite fragile cmd.exe patterns to PowerShell equivalents."""
+    for rewriter in (_rewrite_windows_mkdir, _rewrite_windows_type_findstr):
+        rewritten = rewriter(command)
+        if rewritten:
+            return rewritten
+    return command
+
+
+def _write_python_script(code: str, workspace: Path) -> Path:
+    root = get_exec_cache_dir(workspace)
+    script = root / f"run_{uuid.uuid4().hex}.py"
+    script.write_text(code, encoding="utf-8")
+    return script
+
+
+def rewrite_python_c_command(command: str, workspace: Path) -> tuple[str, Path | None]:
+    """Run python -c via a temp script to avoid Windows/cmd quoting failures."""
+    match = _PYTHON_C_RE.match(command.strip())
+    if not match:
+        return command, None
+    exe = match.group("exe")
+    code = _unwrap_shell_string(match.group("code"))
+    if not code.strip():
+        return command, None
+    script = _write_python_script(code, workspace)
+    return f'{exe} "{script}"', script
 
 
 @tool_parameters(
@@ -88,6 +185,8 @@ class ExecTool(Tool):
             "Execute a shell command and return its output. "
             "Prefer read_file/write_file/edit_file over cat/echo/sed, "
             "and grep/glob over shell find/grep. "
+            "On Windows, mkdir/type/findstr and python -c are rewritten automatically. "
+            "For multi-line Python, write scripts under temp/ then exec them. "
             "Use -y or --yes flags to avoid interactive prompts. "
             "Output is truncated at 10 000 chars; timeout defaults to 60s."
         )
@@ -120,6 +219,11 @@ class ExecTool(Tool):
         if guard_error:
             return guard_error
 
+        temp_script: Path | None = None
+        if _IS_WINDOWS:
+            command = preprocess_windows_command(command)
+            command, temp_script = rewrite_python_c_command(command, Path(cwd))
+
         if self.sandbox:
             if _IS_WINDOWS:
                 logger.warning(
@@ -141,47 +245,51 @@ class ExecTool(Tool):
                 command = f'export PATH="$PATH:{self.path_append}"; {command}'
 
         try:
-            process = await self._spawn(command, cwd, env)
-
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=effective_timeout,
-                )
-            except asyncio.TimeoutError:
-                await self._kill_process(process)
-                return f"Error: Command timed out after {effective_timeout} seconds"
-            except asyncio.CancelledError:
-                await self._kill_process(process)
-                raise
+                process = await self._spawn(command, cwd, env)
 
-            output_parts = []
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=effective_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    await self._kill_process(process)
+                    return f"Error: Command timed out after {effective_timeout} seconds"
+                except asyncio.CancelledError:
+                    await self._kill_process(process)
+                    raise
 
-            if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
+                output_parts = []
 
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    output_parts.append(f"STDERR:\n{stderr_text}")
+                if stdout:
+                    output_parts.append(stdout.decode("utf-8", errors="replace"))
 
-            output_parts.append(f"\nExit code: {process.returncode}")
+                if stderr:
+                    stderr_text = stderr.decode("utf-8", errors="replace")
+                    if stderr_text.strip():
+                        output_parts.append(f"STDERR:\n{stderr_text}")
 
-            result = "\n".join(output_parts) if output_parts else "(no output)"
+                output_parts.append(f"\nExit code: {process.returncode}")
 
-            max_len = self._MAX_OUTPUT
-            if len(result) > max_len:
-                half = max_len // 2
-                result = (
-                    result[:half]
-                    + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
-                    + result[-half:]
-                )
+                result = "\n".join(output_parts) if output_parts else "(no output)"
 
-            return result
+                max_len = self._MAX_OUTPUT
+                if len(result) > max_len:
+                    half = max_len // 2
+                    result = (
+                        result[:half]
+                        + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
+                        + result[-half:]
+                    )
 
-        except Exception as e:
-            return f"Error executing command: {str(e)}"
+                return result
+
+            except Exception as e:
+                return f"Error executing command: {str(e)}"
+        finally:
+            if temp_script is not None:
+                remove_agent_temp_file(temp_script)
 
     @staticmethod
     async def _spawn(
@@ -254,6 +362,7 @@ class ExecTool(Tool):
                 val = os.environ.get(key)
                 if val is not None:
                     env[key] = val
+            env.setdefault("PYTHONIOENCODING", "utf-8")
             return env
         home = os.environ.get("HOME", "/tmp")
         env = {

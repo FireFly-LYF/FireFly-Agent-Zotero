@@ -43,3 +43,9 @@
 2026.5.25  
 1、插件设置页可编辑 backend/config 三份 JSON；  
 2、GitHub Release 一体包：XPI + firefly_ai wheel + llm-wiki 模板 + 安装脚本，见 [INSTALL.md](INSTALL.md)。
+
+2026.6.25
+1、阅读tool_calls调用逻辑，阅读agent loop核心循环，分析工具的并行/串行调用。
+2、新增tool：docx-mcp，实现docx格式文本读写;
+3、rag改为agent自主调用的工具，优先读取markdown格式文件而非pdf;
+4、现有问题: Zotero多轮工具调用未展示, Agent运行时间较长。

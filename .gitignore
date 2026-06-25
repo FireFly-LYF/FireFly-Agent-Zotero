@@ -24,6 +24,13 @@ backend/config/config.json
 backend/config/context.json
 backend/config/history/
 backend/config/*.local.json
+# Agent 生成物与本地下载（勿入库）
+backend/docx/
+backend/download/
+# 工作区运行时数据（模板文件 SOUL/USER/MEMORY 仍可由 workspace/.gitignore 白名单跟踪）
+backend/workspace/sessions/
+backend/workspace/temp/
+backend/workspace/memory/history.jsonl
 backend/llm-wiki/raw/pdf/**
 !backend/llm-wiki/raw/pdf/.gitkeep
 backend/llm-wiki/raw/markdown/**

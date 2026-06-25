@@ -1,6 +1,6 @@
 ---
 name: markdown
-description: 文档格式处理技能，提供 PDF 到 Markdown 的批量转换脚本。
+description: 文档格式处理技能，提供 PDF→Markdown 转换与本地 RAG 检索/建索引（rag_search、rag_index 工具）。
 metadata: {"firefly":{"emoji":"📝"}}
 version: 1.0.0
 ---
@@ -11,6 +11,15 @@ version: 1.0.0
 
 - `scripts/pdf_to_markdown.py`：将 `llm-wiki/raw/pdf` 批量转换到 `llm-wiki/raw/markdown`
 - `scripts/markdown_to_rag.py`：将 `llm-wiki/raw/markdown` 批量切片到 `llm-wiki/raw/rag`（保持目录镜像；**按 Markdown 标题分章节**，章节内受 `--max-chars` 约束；**参考文献 / References 整节合并为单条 chunk**，`chunk_kind` 为 `references`）
+
+## Agent 工具（优先）
+
+文献问答时由 agent **自主调用**，不再默认注入 `[RAG Context]`：
+
+- **`rag_search`**：`query` + `wiki_pdf_path`（来自 `[zotero_current_wiki_pdf_path=…]`）/ `rag_path` / `markdown_path`；可选 `ensure_index=true` 在缺索引时先切片
+- **`rag_index`**：从 `markdown_path` 或 `wiki_pdf_path` 构建/刷新 `raw/rag/*.jsonl`
+
+脚本仍可用于批量离线建库；对话内检索优先用上述工具。
 
 常用示例：
 

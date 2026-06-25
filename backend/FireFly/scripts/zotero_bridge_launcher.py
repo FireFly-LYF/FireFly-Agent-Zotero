@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -30,7 +29,7 @@ def _load_context_config() -> tuple[Path, Path] | None:
     if not ctx_path.is_file():
         return None
     try:
-        data = json.loads(ctx_path.read_text(encoding="utf-8"))
+        data = json.loads(ctx_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
@@ -65,38 +64,28 @@ def main() -> int:
         print(f"Config not found: {config_path}", file=sys.stderr)
         return 1
 
-    cmd = [
-        "firefly",
+    cli_args = [
         "zotero",
+        "agent",
         "--config",
         str(config_path),
         "--workspace",
         str(workspace),
     ]
-    try:
-        return subprocess.call(cmd)
-    except FileNotFoundError:
-        pass
 
+    # Use the current interpreter. Windows entry-point scripts (firefly.exe)
+    # break when a conda env is moved or recreated.
     try:
         from firefly.cli.commands import app
 
         app(
-            [
-                "zotero",
-                "agent",
-                "--config",
-                str(config_path),
-                "--workspace",
-                str(workspace),
-            ],
+            cli_args,
             prog_name="firefly zotero",
             standalone_mode=False,
         )
         return 0
     except SystemExit as exc:
-        code = exc.code if isinstance(exc.code, int) else 1
-        return code
+        return exc.code if isinstance(exc.code, int) else 1
 
 
 if __name__ == "__main__":

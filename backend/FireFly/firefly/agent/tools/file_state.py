@@ -13,6 +13,7 @@ class ReadState:
     mtime: float
     offset: int
     limit: int | None
+    variant: str | None
     content_hash: str | None
     can_dedup: bool
 
@@ -27,7 +28,13 @@ def _hash_file(p: str) -> str | None:
         return None
 
 
-def record_read(path: str | Path, offset: int = 1, limit: int | None = None) -> None:
+def record_read(
+    path: str | Path,
+    offset: int = 1,
+    limit: int | None = None,
+    *,
+    variant: str | None = None,
+) -> None:
     """记录文件已读取（成功读取后调用）。"""
     p = str(Path(path).resolve())
     try:
@@ -38,6 +45,7 @@ def record_read(path: str | Path, offset: int = 1, limit: int | None = None) -> 
         mtime=mtime,
         offset=offset,
         limit=limit,
+        variant=variant,
         content_hash=_hash_file(p),
         can_dedup=True,
     )
@@ -55,6 +63,7 @@ def record_write(path: str | Path) -> None:
         mtime=mtime,
         offset=1,
         limit=None,
+        variant=None,
         content_hash=_hash_file(p),
         can_dedup=False,
     )
@@ -83,13 +92,21 @@ def check_read(path: str | Path) -> str | None:
     return None
 
 
-def is_unchanged(path: str | Path, offset: int = 1, limit: int | None = None) -> bool:
+def is_unchanged(
+    path: str | Path,
+    offset: int = 1,
+    limit: int | None = None,
+    *,
+    variant: str | None = None,
+) -> bool:
     """若文件曾以相同参数读取且 mtime 未变化，则返回 True。"""
     p = str(Path(path).resolve())
     entry = _state.get(p)
     if entry is None:
         return False
     if not entry.can_dedup:
+        return False
+    if entry.variant != variant:
         return False
     if entry.offset != offset or entry.limit != limit:
         return False

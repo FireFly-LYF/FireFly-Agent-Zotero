@@ -6,7 +6,8 @@ platform-specific binaries (all subprocess calls are mocked).
 """
 
 import sys
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -54,6 +55,7 @@ class TestBuildEnvWindows:
     _EXPECTED_KEYS = {
         "SYSTEMROOT", "COMSPEC", "USERPROFILE", "HOMEDRIVE",
         "HOMEPATH", "TEMP", "TMP", "PATHEXT", "PATH",
+        "PYTHONIOENCODING",
         *_WINDOWS_ENV_KEYS,
     }
 
@@ -277,3 +279,42 @@ class TestExecuteEndToEnd:
 
         assert "hello world" in result
         assert "Exit code: 0" in result
+
+
+class TestWindowsCommandPreprocess:
+
+    def test_mkdir_rewritten_to_new_item(self):
+        from firefly.agent.tools.shell import preprocess_windows_command
+
+        cmd = 'mkdir "D:\\workspace\\docx"'
+        rewritten = preprocess_windows_command(cmd)
+        assert "New-Item" in rewritten
+        assert "Directory" in rewritten
+
+    def test_if_not_exist_mkdir_rewritten(self):
+        from firefly.agent.tools.shell import preprocess_windows_command
+
+        cmd = 'if not exist "D:\\workspace\\docx" mkdir "D:\\workspace\\docx"'
+        rewritten = preprocess_windows_command(cmd)
+        assert "Test-Path" in rewritten
+        assert "New-Item" in rewritten
+
+    def test_type_findstr_rewritten(self):
+        from firefly.agent.tools.shell import preprocess_windows_command
+
+        cmd = 'type "D:\\data\\out.txt" | findstr /N "Page"'
+        rewritten = preprocess_windows_command(cmd)
+        assert "Get-Content" in rewritten
+        assert "Select-String" in rewritten
+
+    def test_rewrite_python_c_writes_script(self, tmp_path):
+        from firefly.agent.tools.shell import rewrite_python_c_command
+
+        code = "print('hello from script')"
+        command = f'python -c "{code}"'
+        rewritten, script_path = rewrite_python_c_command(command, tmp_path)
+        assert script_path is not None
+        assert script_path.exists()
+        assert str(script_path) in rewritten
+        assert "hello from script" in script_path.read_text(encoding="utf-8")
+        assert script_path.parent.name == ".exec-cache"

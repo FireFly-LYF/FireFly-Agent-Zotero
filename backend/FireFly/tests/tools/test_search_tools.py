@@ -75,6 +75,57 @@ async def test_grep_respects_glob_filter_and_context(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_clamps_context_after_instead_of_error(tmp_path: Path) -> None:
+    (tmp_path / "sample.txt").write_text("match_here\n", encoding="utf-8")
+    tool = GrepTool(workspace=tmp_path, allowed_dir=tmp_path)
+    cast = tool.cast_params(
+        {
+            "pattern": "match_here",
+            "path": ".",
+            "output_mode": "content",
+            "context_after": 50,
+        }
+    )
+    assert tool.validate_params(cast) == []
+    result = await tool.execute(**cast)
+    assert "context_after clamped from 50 to 20" in result
+    assert "match_here" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_normalizes_pdf_extract_and_hints(tmp_path: Path) -> None:
+    pdf_like = (
+        "--- Page 1 ---\n"
+        "In electromagnetic countermeasure circumstances, modulated in-\n"
+        "terrupted sampling repeated jamming (ISRJ)\n"
+        "I.\n"
+        "INTRODUCTION\n"
+    )
+    cache_dir = tmp_path / ".firefly" / "tool-results" / "chat"
+    cache_dir.mkdir(parents=True)
+    cache_file = cache_dir / "call_pdf.txt"
+    cache_file.write_text(pdf_like, encoding="utf-8")
+
+    tool = GrepTool(workspace=tmp_path, allowed_dir=tmp_path)
+    result = await tool.execute(
+        pattern="interrupted sampling",
+        path=str(cache_file),
+        output_mode="content",
+        fixed_strings=True,
+    )
+    assert "interrupted sampling" in result
+
+    miss = await tool.execute(
+        pattern="Abstract",
+        path=str(cache_file),
+        output_mode="content",
+    )
+    assert "No matches found" in miss
+    assert "INTRODUCTION" in miss
+    assert "read_file(path, pages=" in miss
+
+
+@pytest.mark.asyncio
 async def test_grep_defaults_to_files_with_matches(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("match_here\n", encoding="utf-8")
