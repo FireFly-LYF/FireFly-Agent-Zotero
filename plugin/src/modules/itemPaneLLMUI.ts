@@ -1606,14 +1606,17 @@ export function registerLLMItemPaneSection() {
             const assistant = appendAssistantShell(currentModelLabel);
             let streamedText = "";
             let streamedThinking = "";
+            let allowAnswerStream = false;
             await streamFromFireFly(
               messageWithContext,
               streamSessionID,
               mediaPaths,
               (delta) => {
+                if (!allowAnswerStream) {
+                  return;
+                }
                 streamedText += delta;
                 const parsedLive = splitThinkingAndAnswer(streamedText);
-                assistant.setThinking(parsedLive.thinking);
                 assistant.setAnswerText(sanitizeAssistantText(parsedLive.answer || ""));
                 scrollConversationToBottom();
               },
@@ -1621,16 +1624,6 @@ export function registerLLMItemPaneSection() {
                 if (finalContent) {
                   if (!streamedText.trim()) {
                     streamedText = finalContent;
-                  } else {
-                    const finalParsed = splitThinkingAndAnswer(finalContent);
-                    if (finalParsed.thinking) {
-                      const liveParsed = splitThinkingAndAnswer(streamedText);
-                      const mergedThinking = [liveParsed.thinking, finalParsed.thinking]
-                        .filter((s) => !!s && s.trim())
-                        .join("\n\n")
-                        .trim();
-                      assistant.setThinking(mergedThinking);
-                    }
                   }
                   assistant.setAnswerText(
                     sanitizeAssistantText(splitThinkingAndAnswer(streamedText).answer || ""),
@@ -1640,7 +1633,17 @@ export function registerLLMItemPaneSection() {
               },
               (thinkingDelta) => {
                 streamedThinking += thinkingDelta;
-                assistant.setThinking(streamedThinking);
+                assistant.appendThinkingDelta(thinkingDelta);
+                scrollConversationToBottom();
+              },
+              (toolStep) => {
+                assistant.appendToolStep(toolStep);
+                scrollConversationToBottom();
+              },
+              (_resuming) => {
+                if (_resuming === false) {
+                  allowAnswerStream = true;
+                }
                 scrollConversationToBottom();
               },
               activeStreamAbortController.signal,
@@ -1651,7 +1654,7 @@ export function registerLLMItemPaneSection() {
               .filter((s) => !!s && s.trim())
               .join("\n\n")
               .trim();
-            assistant.setThinking(mergedThinking, { clearWhenEmpty: true });
+            assistant.finalizeProgressThinking(mergedThinking);
             if (parsed.answer) {
               assistant.setAnswerText(sanitizeAssistantText(parsed.answer));
             }
@@ -1762,62 +1765,273 @@ export function registerLLMItemPaneSection() {
         modelLabel.style.fontWeight = "600";
         modelLabel.textContent = modelLabelText;
 
-        const thinkingWrap = ownerDoc.createElement("div");
-        thinkingWrap.style.borderRadius = "0";
-        thinkingWrap.style.border = "none";
-        thinkingWrap.style.background = "transparent";
-        thinkingWrap.style.padding = "0";
-        thinkingWrap.style.display = "none";
+        const progressLane = ownerDoc.createElement("div");
+        progressLane.style.display = "none";
+        progressLane.style.flexDirection = "column";
+        progressLane.style.gap = "10px";
+        progressLane.style.width = "100%";
+        progressLane.style.minWidth = "0";
+        progressLane.style.maxWidth = "100%";
 
-        const thinkingHead = ownerDoc.createElement("div");
-        thinkingHead.style.display = "flex";
-        thinkingHead.style.alignItems = "center";
-        thinkingHead.style.gap = "6px";
-        thinkingHead.style.cursor = "pointer";
-        thinkingHead.style.userSelect = "none";
-        (thinkingHead.style as any).MozUserSelect = "none";
-
-        const arrow = ownerDoc.createElement("span");
-        arrow.textContent = "▼";
-        arrow.style.opacity = "0.65";
-
-        const tTitle = ownerDoc.createElement("span");
-        tTitle.textContent = "Thinking";
-        tTitle.style.fontWeight = "600";
-
-        thinkingHead.append(arrow, tTitle);
-
-        const detailsLabel = ownerDoc.createElement("div");
-        detailsLabel.textContent = "DETAILS";
-        detailsLabel.style.fontSize = "10px";
-        detailsLabel.style.opacity = "0.62";
-        detailsLabel.style.letterSpacing = "0.12em";
-        detailsLabel.style.marginTop = "6px";
-
-        const thinkingBody = ownerDoc.createElement("div");
-        thinkingBody.style.marginTop = "4px";
-        thinkingBody.style.whiteSpace = "pre-wrap";
-        thinkingBody.style.wordBreak = "break-word";
-        (thinkingBody.style as any).overflowWrap = "anywhere";
-        thinkingBody.style.fontSize = "13px";
-        thinkingBody.style.lineHeight = "1.7";
-        thinkingBody.style.opacity = "0.78";
-        thinkingBody.style.fontFamily =
-          "'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Segoe UI', sans-serif";
-        thinkingBody.textContent = " ";
-
-        let open = true;
-        const setOpen = (v: boolean) => {
-          open = v;
-          const bodyDisplay = open ? "block" : "none";
-          detailsLabel.style.display = bodyDisplay;
-          thinkingBody.style.display = bodyDisplay;
-          arrow.textContent = open ? "▼" : "▶";
+        type ProgressSegment = {
+          root: HTMLDivElement;
+          thinkingWrap: HTMLDivElement;
+          thinkingBody: HTMLDivElement;
+          stepsWrap: HTMLDivElement;
+          thinkingBuf: string;
+          hasToolSteps: boolean;
+          setThinkingOpen: (open: boolean) => void;
         };
-        setOpen(true);
-        thinkingHead.addEventListener("click", () => setOpen(!open));
 
-        thinkingWrap.append(thinkingHead, detailsLabel, thinkingBody);
+        let currentSegment: ProgressSegment | null = null;
+        const progressSegments: ProgressSegment[] = [];
+
+        const formatToolStepLabel = (raw: string): string => {
+          const text = String(raw || "").trim();
+          if (!text) return "";
+          if (text.startsWith("$ ")) return text;
+          return text.charAt(0).toUpperCase() + text.slice(1);
+        };
+
+        /** 按顶层逗号拆分多条工具提示，忽略引号内的逗号。 */
+        const splitToolHintLines = (hint: string): string[] => {
+          const parts: string[] = [];
+          let buf = "";
+          let depth = 0;
+          let inString = false;
+          let quoteChar = "";
+          let escaped = false;
+          for (let i = 0; i < hint.length; i++) {
+            const ch = hint[i]!;
+            if (inString) {
+              buf += ch;
+              if (escaped) {
+                escaped = false;
+              } else if (ch === "\\") {
+                escaped = true;
+              } else if (ch === quoteChar) {
+                inString = false;
+              }
+              continue;
+            }
+            if (ch === '"' || ch === "'") {
+              inString = true;
+              quoteChar = ch;
+              buf += ch;
+              continue;
+            }
+            if (ch === "(") {
+              depth += 1;
+              buf += ch;
+              continue;
+            }
+            if (ch === ")") {
+              depth = Math.max(0, depth - 1);
+              buf += ch;
+              continue;
+            }
+            if (ch === "," && depth === 0) {
+              const next = hint[i + 1];
+              if (next === " ") {
+                const piece = buf.trim();
+                if (piece) parts.push(piece);
+                buf = "";
+                i += 1;
+                continue;
+              }
+            }
+            buf += ch;
+          }
+          const tail = buf.trim();
+          if (tail) parts.push(tail);
+          return parts.length ? parts : [hint.trim()];
+        };
+
+        const appendStepRow = (stepsWrap: HTMLDivElement, label: string) => {
+          const row = ownerDoc.createElement("div");
+          row.textContent = label;
+          row.style.fontSize = "12px";
+          row.style.lineHeight = "1.55";
+          row.style.opacity = "0.62";
+          row.style.whiteSpace = "pre-wrap";
+          row.style.wordBreak = "break-word";
+          (row.style as any).overflowWrap = "anywhere";
+          row.style.fontFamily =
+            "'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif";
+          stepsWrap.appendChild(row);
+        };
+
+        const createProgressSegment = (): ProgressSegment => {
+          const root = ownerDoc.createElement("div");
+          root.style.display = "flex";
+          root.style.flexDirection = "column";
+          root.style.gap = "4px";
+          root.style.minWidth = "0";
+          root.style.maxWidth = "100%";
+
+          const thinkingWrap = ownerDoc.createElement("div");
+          thinkingWrap.style.display = "none";
+
+          const thinkingHead = ownerDoc.createElement("div");
+          thinkingHead.style.display = "inline-flex";
+          thinkingHead.style.alignItems = "center";
+          thinkingHead.style.gap = "6px";
+          thinkingHead.style.cursor = "pointer";
+          thinkingHead.style.userSelect = "none";
+          (thinkingHead.style as any).MozUserSelect = "none";
+
+          const arrow = ownerDoc.createElement("span");
+          arrow.textContent = "▼";
+          arrow.style.opacity = "0.65";
+          arrow.style.fontSize = "12px";
+
+          const tTitle = ownerDoc.createElement("span");
+          tTitle.textContent = "Thinking";
+          tTitle.style.fontWeight = "600";
+          tTitle.style.fontSize = "13px";
+
+          thinkingHead.append(arrow, tTitle);
+
+          const thinkingBody = ownerDoc.createElement("div");
+          thinkingBody.style.marginTop = "4px";
+          thinkingBody.style.marginLeft = "2px";
+          thinkingBody.style.whiteSpace = "pre-wrap";
+          thinkingBody.style.wordBreak = "break-word";
+          (thinkingBody.style as any).overflowWrap = "anywhere";
+          thinkingBody.style.fontSize = "13px";
+          thinkingBody.style.lineHeight = "1.7";
+          thinkingBody.style.opacity = "0.78";
+          thinkingBody.style.fontFamily =
+            "'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Segoe UI', sans-serif";
+          thinkingBody.textContent = " ";
+
+          let open = true;
+          const setOpen = (v: boolean) => {
+            open = v;
+            thinkingBody.style.display = open ? "block" : "none";
+            arrow.textContent = open ? "▼" : "▶";
+          };
+          thinkingHead.addEventListener("click", () => setOpen(!open));
+
+          thinkingWrap.append(thinkingHead, thinkingBody);
+
+          const stepsWrap = ownerDoc.createElement("div");
+          stepsWrap.style.display = "none";
+          stepsWrap.style.flexDirection = "column";
+          stepsWrap.style.gap = "2px";
+          stepsWrap.style.paddingLeft = "2px";
+
+          root.append(thinkingWrap, stepsWrap);
+          progressLane.appendChild(root);
+          progressLane.style.display = "flex";
+
+          return {
+            root,
+            thinkingWrap,
+            thinkingBody,
+            stepsWrap,
+            thinkingBuf: "",
+            hasToolSteps: false,
+            setThinkingOpen: setOpen,
+          };
+        };
+
+        const collapseSegmentThinking = (seg: ProgressSegment | null) => {
+          if (!seg || !seg.thinkingBuf.trim()) return;
+          seg.setThinkingOpen(false);
+        };
+
+        const startNewSegment = () => {
+          collapseSegmentThinking(currentSegment);
+          currentSegment = createProgressSegment();
+          progressSegments.push(currentSegment);
+        };
+
+        const ensureSegment = () => {
+          if (!currentSegment) {
+            startNewSegment();
+          }
+          return currentSegment!;
+        };
+
+        const appendThinkingDelta = (delta: string) => {
+          const chunk = String(delta || "");
+          if (!chunk) return;
+          if (currentSegment?.hasToolSteps) {
+            startNewSegment();
+          }
+          const seg = ensureSegment();
+          seg.thinkingBuf += chunk;
+          seg.thinkingWrap.style.display = "block";
+          seg.thinkingBody.textContent = formatThinkingParagraphs(seg.thinkingBuf);
+          seg.setThinkingOpen(true);
+          setTypingVisible(false);
+        };
+
+        const appendToolStep = (hint: string) => {
+          const seg = ensureSegment();
+          const hadThinking = !!seg.thinkingBuf.trim();
+          const lines = splitToolHintLines(hint);
+          for (const line of lines) {
+            const label = formatToolStepLabel(line);
+            if (!label) continue;
+            appendStepRow(seg.stepsWrap, label);
+          }
+          if (seg.stepsWrap.childElementCount > 0) {
+            seg.stepsWrap.style.display = "flex";
+            if (hadThinking && !seg.hasToolSteps) {
+              collapseSegmentThinking(seg);
+            }
+            seg.hasToolSteps = true;
+            setTypingVisible(false);
+          }
+        };
+
+        const finalizeProgressThinking = (fallbackThinking: string) => {
+          const tail = String(fallbackThinking || "").trim();
+          if (tail && currentSegment && !currentSegment.thinkingBuf.trim()) {
+            currentSegment.thinkingBuf = tail;
+            currentSegment.thinkingWrap.style.display = "block";
+            currentSegment.thinkingBody.textContent = formatThinkingParagraphs(tail);
+            progressLane.style.display = "flex";
+          }
+          if (!progressLane.childElementCount && tail) {
+            startNewSegment();
+            currentSegment!.thinkingBuf = tail;
+            currentSegment!.thinkingWrap.style.display = "block";
+            currentSegment!.thinkingBody.textContent = formatThinkingParagraphs(tail);
+          }
+          if (!progressLane.childElementCount) {
+            progressLane.style.display = "none";
+          } else {
+            for (let i = 0; i < progressSegments.length - 1; i++) {
+              collapseSegmentThinking(progressSegments[i]!);
+            }
+            if (currentSegment) {
+              collapseSegmentThinking(currentSegment);
+            }
+          }
+        };
+
+        const setThinking = (t: string, options?: { clearWhenEmpty?: boolean }) => {
+          const clearWhenEmpty = Boolean(options?.clearWhenEmpty);
+          const val = (t || "").trim();
+          progressLane.replaceChildren();
+          progressSegments.length = 0;
+          currentSegment = null;
+          if (!val) {
+            if (clearWhenEmpty) {
+              progressLane.style.display = "none";
+            }
+            return;
+          }
+          startNewSegment();
+          currentSegment!.thinkingBuf = val;
+          currentSegment!.thinkingWrap.style.display = "block";
+          currentSegment!.thinkingBody.textContent = formatThinkingParagraphs(val);
+          currentSegment!.setThinkingOpen(false);
+          setTypingVisible(false);
+        };
 
         const answerBubble = ownerDoc.createElement("div");
         answerBubble.style.padding = "10px 12px";
@@ -2088,37 +2302,26 @@ export function registerLLMItemPaneSection() {
           })();
         });
 
-        wrap.append(modelLabel, thinkingWrap, answerBubble);
+        wrap.append(modelLabel, progressLane, answerBubble);
         conversationArea.appendChild(wrap);
         scrollConversationToBottom();
 
         let hasThinkingContent = false;
-        const setThinking = (t: string, options?: { clearWhenEmpty?: boolean }) => {
-          const clearWhenEmpty = Boolean(options?.clearWhenEmpty);
-          const val = (t || "").trim();
-          if (!val) {
-            if (clearWhenEmpty || !hasThinkingContent) {
-              thinkingWrap.style.display = "none";
-              thinkingBody.textContent = " ";
-              hasThinkingContent = false;
-            }
-            return;
-          }
-          hasThinkingContent = true;
-          thinkingWrap.style.display = "block";
-          // thinking 流式阶段与最终阶段统一走同一格式化逻辑，避免字体观感不一致。
-          thinkingBody.textContent = formatThinkingParagraphs(val);
-          // 一旦开始输出 thinking，立刻隐藏等待中的三个点。
-          setTypingVisible(false);
-        };
+        const setThinkingLegacy = setThinking;
 
         return {
           wrap,
           answerBubble,
           answerMdSlot: mdSlot,
-          thinkingWrap,
-          thinkingBody,
-          setThinking,
+          progressLane,
+          setThinking: (t: string, options?: { clearWhenEmpty?: boolean }) => {
+            const val = (t || "").trim();
+            hasThinkingContent = !!val;
+            setThinkingLegacy(t, options);
+          },
+          appendThinkingDelta,
+          appendToolStep,
+          finalizeProgressThinking,
           setAnswerText,
           setTypingVisible,
           setAssistantSessionMessageIndex,

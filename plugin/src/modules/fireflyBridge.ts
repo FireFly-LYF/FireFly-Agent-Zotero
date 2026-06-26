@@ -215,6 +215,8 @@ export async function streamFromFireFly(
   onDelta: (delta: string) => void,
   onFinal?: (content: string) => void,
   onThinkingDelta?: (delta: string) => void,
+  onToolStep?: (content: string) => void,
+  onStreamEnd?: (resuming: boolean) => void,
   abortSignal?: AbortSignal,
   literatureTitle?: string,
 ): Promise<void> {
@@ -267,11 +269,17 @@ export async function streamFromFireFly(
             delta?: string;
             content?: string;
             message?: string;
+            resuming?: string | boolean;
           };
           if (event.type === "delta" && event.delta) {
             onDelta(event.delta);
           } else if (event.type === "thinking_delta" && event.delta) {
             onThinkingDelta?.(event.delta);
+          } else if (event.type === "tool_step" && event.content) {
+            onToolStep?.(event.content);
+          } else if (event.type === "end") {
+            const resuming = event.resuming === true || event.resuming === "true";
+            onStreamEnd?.(resuming);
           } else if (event.type === "final" && event.content) {
             onFinal?.(event.content);
           } else if (event.type === "error") {

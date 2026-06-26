@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from firefly.bus.events import OutboundMessage
-from firefly.cli.commands import _make_provider, app
+from firefly.cli.commands import _make_provider, _zotero_forward_args, app
 from firefly.config.schema import Config
 from firefly.cron.types import CronJob, CronPayload
 from firefly.providers.openai_codex_provider import _strip_model_prefix
@@ -1194,3 +1194,18 @@ def test_channels_login_requires_channel_name() -> None:
     result = runner.invoke(app, ["channels", "login"])
 
     assert result.exit_code == 2
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ([], ["agent"]),
+        (["--logs"], ["agent", "--logs"]),
+        (["-m", "hi"], ["agent", "-m", "hi"]),
+        (["agent", "--logs"], ["agent", "--logs"]),
+        (["gateway"], ["gateway"]),
+        (["status"], ["status"]),
+    ],
+)
+def test_zotero_forward_args(raw: list[str], expected: list[str]) -> None:
+    assert _zotero_forward_args(raw) == expected

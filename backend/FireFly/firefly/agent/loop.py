@@ -19,6 +19,7 @@ from firefly.zotero_interface.utils import strip_zotero_user_content_for_session
 from firefly.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from firefly.agent.memory import Consolidator, Dream
 from firefly.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunSpec, AgentRunner
+from firefly.agent.reply_summarizer import replace_last_assistant_text, summarize_zotero_reply
 from firefly.agent.subagent import SubagentManager
 from firefly.agent.tools.cron import CronTool
 from firefly.agent.skills import BUILTIN_SKILLS_DIR
@@ -433,7 +434,7 @@ class AgentLoop:
         chat_id: str = "direct",
         message_id: str | None = None,
         pending_queue: asyncio.Queue | None = None,
-    ) -> tuple[str | None, list[str], list[dict], str, bool]:
+    ) -> tuple[str | None, list[str], list[dict], str, bool, list[dict[str, str]]]:
         """运行 agent 迭代循环。
 
         *on_stream*: called with each content delta during streaming.
@@ -441,7 +442,7 @@ class AgentLoop:
         ``resuming=True`` means tool calls follow (spinner should restart);
         ``resuming=False`` means this is the final response.
 
-        Returns (final_content, tools_used, messages, stop_reason, had_injections).
+        Returns (final_content, tools_used, messages, stop_reason, had_injections, tool_events).
         """
         loop_hook = _LoopHook(
             self,
@@ -513,7 +514,14 @@ class AgentLoop:
             logger.warning("Max iterations ({}) reached", self.max_iterations)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
-        return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
+        return (
+            result.final_content,
+            result.tools_used,
+            result.messages,
+            result.stop_reason,
+            result.had_injections,
+            result.tool_events,
+        )
 
     async def run(self) -> None:
         """运行 agent 主循环，将消息分发为任务以保持对 /stop 的响应。"""
@@ -599,6 +607,7 @@ class AgentLoop:
             async with lock, gate:
                 try:
                     on_stream = on_stream_end = None
+                    is_zotero_stream = msg.metadata.get("_source") == "zotero_stream"
                     if msg.metadata.get("_wants_stream"):
                         # 将一次回答拆分为独立的流式片段。
                         stream_base_id = f"{msg.session_key}:{time.time_ns()}"
@@ -608,6 +617,9 @@ class AgentLoop:
                             return f"{stream_base_id}:{stream_segment}"
 
                         async def on_stream(delta: str) -> None:
+                            # Zotero 插件：执行期仅展示 thinking/工具进度，正文由总结 agent 流式输出。
+                            if is_zotero_stream:
+                                return
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True
                             meta["_stream_id"] = _current_stream_id()
@@ -744,7 +756,7 @@ class AgentLoop:
                 session_summary=pending,
                 current_role=current_role,
             )
-            final_content, _, all_msgs, _, _ = await self._run_agent_loop(
+            final_content, _, all_msgs, _, _, _ = await self._run_agent_loop(
                 messages, session=session, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
             )
@@ -837,18 +849,40 @@ class AgentLoop:
             self.sessions.save(session)
             user_persisted_early = True
 
-        final_content, _, all_msgs, stop_reason, had_injections = await self._run_agent_loop(
-            initial_messages,
-            on_progress=on_progress or _bus_progress,
-            on_stream=on_stream,
-            on_reasoning_stream=on_reasoning_stream,
-            on_stream_end=on_stream_end,
-            session=session,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            message_id=msg.metadata.get("message_id"),
-            pending_queue=pending_queue,
+        final_content, _, all_msgs, stop_reason, had_injections, tool_events = (
+            await self._run_agent_loop(
+                initial_messages,
+                on_progress=on_progress or _bus_progress,
+                on_stream=on_stream,
+                on_reasoning_stream=on_reasoning_stream,
+                on_stream_end=on_stream_end,
+                session=session,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                message_id=msg.metadata.get("message_id"),
+                pending_queue=pending_queue,
+            )
         )
+
+        if (
+            msg.metadata.get("_source") == "zotero_stream"
+            and on_stream is not None
+            and stop_reason != "error"
+        ):
+            user_query = strip_zotero_user_content_for_session_storage(msg.content)
+            if not user_query.strip():
+                user_query = msg.content
+            summarized = await summarize_zotero_reply(
+                self.provider,
+                self.model,
+                user_query=user_query,
+                tool_events=tool_events,
+                agent_draft=final_content or "",
+                on_stream=on_stream,
+            )
+            if summarized.strip():
+                final_content = summarized
+                replace_last_assistant_text(all_msgs, summarized)
 
         if final_content is None or not final_content.strip():
             final_content = EMPTY_FINAL_RESPONSE_MESSAGE

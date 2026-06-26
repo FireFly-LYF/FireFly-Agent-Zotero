@@ -1159,19 +1159,35 @@ def agent(
                 pdf_path = _extract_current_wiki_pdf_path(content)
                 if not pdf_path:
                     return content
-                from firefly.skills.markdown.scripts.rag_paths import llm_wiki_markdown_mirror_for_pdf
+                from firefly.skills.markdown.scripts.rag_paths import (
+                    llm_wiki_markdown_mirror_for_pdf,
+                    resolve_markdown_path_from_pdf,
+                )
 
                 md = llm_wiki_markdown_mirror_for_pdf(Path(pdf_path))
-                if md is None:
-                    return content
-                marker = f"[zotero_current_wiki_markdown_path={md}]"
-                if marker in content:
-                    return content
                 m = _WIKI_PDF_MARKER_RE.search(content)
+                insert_at = m.end() if m else 0
+                if md is not None:
+                    marker = f"[zotero_current_wiki_markdown_path={md}]"
+                    if marker in content:
+                        return content
+                    block = (
+                        f"\n{marker}\n"
+                        "[zotero_literature_read_hint] Full-text: read_file the markdown path above. "
+                        "Do NOT read_file the PDF when this marker is present."
+                    )
+                    if m:
+                        return content[:insert_at] + block + content[insert_at:]
+                    return f"{block}\n\n{content}"
+                expected_md = resolve_markdown_path_from_pdf(Path(pdf_path))
+                missing = (
+                    f"\n[zotero_markdown_mirror_missing] Expected markdown at: {expected_md}\n"
+                    "[zotero_literature_read_hint] No .md mirror yet — run PDF→markdown conversion, "
+                    "then read_file that path. PDF read is a slow fallback only."
+                )
                 if m:
-                    insert_at = m.end()
-                    return content[:insert_at] + f"\n{marker}" + content[insert_at:]
-                return f"{marker}\n\n{content}"
+                    return content[:insert_at] + missing + content[insert_at:]
+                return f"{missing}\n\n{content}"
 
             _MAX_WIKI_CONTEXT_CHARS = 32000
 
@@ -1933,7 +1949,13 @@ def agent(
                             await _stream_publish(msg.chat_id, {"type": "thinking_delta", "delta": msg.content})
                             continue
                         if msg.metadata.get("_stream_end"):
-                            await _stream_publish(msg.chat_id, {"type": "end"})
+                            await _stream_publish(
+                                msg.chat_id,
+                                {
+                                    "type": "end",
+                                    "resuming": "true" if msg.metadata.get("_resuming") else "false",
+                                },
+                            )
                             if renderer:
                                 await renderer.on_end(
                                     resuming=msg.metadata.get("_resuming", False),
@@ -1968,6 +1990,14 @@ def agent(
                                 pass
                             else:
                                 await _print_interactive_progress_line(msg.content, _thinking)
+                            # Zotero 插件 SSE：始终推送工具步骤，不受 channels.send_tool_hints 限制
+                            if is_tool_hint:
+                                hint = str(msg.content or "").strip()
+                                if hint:
+                                    await _stream_publish(
+                                        msg.chat_id,
+                                        {"type": "tool_step", "content": hint},
+                                    )
                             continue
 
                         if not turn_done.is_set():

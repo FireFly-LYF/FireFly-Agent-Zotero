@@ -20,7 +20,9 @@ A .docx file is a ZIP archive of XML files. This server unpacks the archive, par
 - Bulk find-and-replace with revision marks
 - Any task where changes must be visible as Word revisions
 
-**Do NOT use for:** Creating new .docx from scratch (use docx-js instead), PDFs, spreadsheets, or `.doc` (legacy binary format — convert to .docx first).
+**Do NOT use for:** PDFs, spreadsheets, or `.doc` (legacy binary format — convert to .docx first).
+
+**Creating new .docx in this project:** use `mcp_docx-mcp_create_from_markdown` when you have a `.md` file, or `create_document` then `insert_text` / `replace_text` and `save_document`. Never `write_file` to a `.docx` path.
 
 ## Workflow
 

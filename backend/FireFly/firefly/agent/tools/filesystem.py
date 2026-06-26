@@ -255,7 +255,18 @@ class ReadFileTool(_FsTool):
                     )
                     fp = md_mirror
                 else:
-                    return self._read_pdf(fp, pages)
+                    from firefly.skills.markdown.scripts.rag_paths import resolve_markdown_path_from_pdf
+
+                    expected_md = resolve_markdown_path_from_pdf(fp)
+                    pdf_result = self._read_pdf(fp, pages)
+                    if expected_md:
+                        hint = (
+                            f"(Note: no markdown mirror at {expected_md}. "
+                            "Convert PDF→markdown first, then read_file the .md path. "
+                            "PDF parsing is slower and was used as fallback.)\n"
+                        )
+                        return hint + pdf_result
+                    return pdf_result
 
             plain_cache = is_tool_result_cache_path(fp)
             dedup_variant = "tool-result" if plain_cache else None
@@ -393,6 +404,13 @@ class WriteFileTool(_FsTool):
             if content is None:
                 raise ValueError("Unknown content")
             fp = self._resolve(path)
+            if fp.suffix.lower() in {".docx", ".doc"}:
+                return (
+                    f"Error: Cannot write Word binary format with write_file ({fp.name}). "
+                    "Use docx-mcp instead: mcp_docx-mcp_create_from_markdown (from .md), "
+                    "mcp_docx-mcp_create_document, then mcp_docx-mcp_insert_text / replace_text "
+                    "and mcp_docx-mcp_save_document. Plain text or Markdown is not a valid .docx."
+                )
             if err := self._guard_scratch_write(fp):
                 return err
             fp.parent.mkdir(parents=True, exist_ok=True)

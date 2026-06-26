@@ -49,3 +49,9 @@
 2、新增tool：docx-mcp，实现docx格式文本读写;
 3、rag改为agent自主调用的工具，优先读取markdown格式文件而非pdf;
 4、现有问题: Zotero多轮工具调用未展示, Agent运行时间较长。
+
+2026.6.26 issue
+1、对 markdown 用 grep 定位，不要凭 offset 猜;
+2、用户指定路径时，用同一路径 create_from_markdown 或 docx 编辑工具覆盖;
+3、考虑不把带 tool_calls 的超长 assistant 草稿写入用户可见历史，或只存摘要;
+4、写 docx 后 read_file / 打开检查是否真有空白段落，再回复用户

@@ -271,6 +271,16 @@ def main(
     pass
 
 
+def _zotero_forward_args(raw_args: list[str]) -> list[str]:
+    """将主 CLI 参数规范化为 zotero_interface 子命令参数。"""
+    forward_args = list(raw_args)
+    if not forward_args:
+        return ["agent"]
+    if forward_args[0].startswith("-"):
+        return ["agent", *forward_args]
+    return forward_args
+
+
 @app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
@@ -278,10 +288,7 @@ def zotero(ctx: typer.Context):
     """转发到 Zotero 集成命令入口（firefly.zotero_interface）。"""
     from firefly.zotero_interface.commands import app as zotero_app
 
-    forward_args = list(ctx.args)
-    if not forward_args:
-        # 便捷模式：`firefly zotero` 直接进入 Zotero 桥接 agent。
-        forward_args = ["agent"]
+    forward_args = _zotero_forward_args(list(ctx.args))
 
     try:
         zotero_app(

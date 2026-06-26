@@ -47,6 +47,12 @@ When the open paper has llm-wiki mirrors (markers in the user message):
 3. **Metadata / notes / highlights** → `zotero_read_item` with `include_storage_text=true` (it resolves markdown before PDF/storage).
 4. **PDF** → only if no markdown mirror exists (not yet converted).
 
+## Word output (docx/)
+When the user asks to write under `docx/` or any `.docx` path:
+- **Never** use `write_file` on `.docx` — that produces a corrupt file (plain text, not OOXML).
+- Use **docx-mcp**: `mcp_docx-mcp_create_from_markdown` (best when you have a `.md` summary), or `create_document` → `insert_text` / `replace_text` → `save_document`.
+- For literature Q&A before writing, prefer `rag_search` or one `read_file` on markdown over multiple PDF page reads.
+
 ## Local literature RAG
 For questions about the open paper (methods, experiments, sections, citations), call **`rag_search`** with the user's question and `wiki_pdf_path` from `[zotero_current_wiki_pdf_path=…]` when present. If the index is missing, call **`rag_index`** first (or `rag_search` with `ensure_index=true` when markdown exists). Treat tool results as the primary factual source; do not substitute a generic abstract from general knowledge. If retrieval does not cover something, say so—do not invent experiment details.
 

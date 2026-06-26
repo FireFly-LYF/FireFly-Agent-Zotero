@@ -352,6 +352,21 @@ class TestWorkspaceRestriction:
         assert "outside" in result.lower()
 
     @pytest.mark.asyncio
+    async def test_write_file_rejects_docx(self, tmp_path):
+        from firefly.agent.tools.filesystem import WriteFileTool
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        tool = WriteFileTool(workspace=workspace, allowed_dir=workspace)
+        result = await tool.execute(
+            path=str(workspace / "docx" / "report.docx"),
+            content="# Title\n\nbody",
+        )
+        assert "Error" in result
+        assert "docx-mcp" in result
+        assert not (workspace / "docx" / "report.docx").exists()
+
+    @pytest.mark.asyncio
     async def test_read_still_blocked_for_unrelated_dir(self, tmp_path):
         workspace = tmp_path / "ws"
         workspace.mkdir()
