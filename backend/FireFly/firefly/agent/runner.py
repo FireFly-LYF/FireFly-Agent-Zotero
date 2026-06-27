@@ -187,7 +187,7 @@ class AgentRunner:
         return injected_messages
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
-        from firefly.agent.temp_workspace import begin_agent_temp_turn, cleanup_agent_temp_turn
+        from firefly.agent.temp import begin_agent_temp_turn, cleanup_agent_temp_turn
 
         begin_agent_temp_turn()
         try:

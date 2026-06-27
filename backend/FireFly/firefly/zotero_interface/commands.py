@@ -72,6 +72,10 @@ app = typer.Typer(
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 
+# Zotero 插件 SSE：多轮 tool + 总结 agent 可能长时间无 delta，需更长空闲超时与 keepalive。
+ZOTERO_STREAM_IDLE_TIMEOUT_S = 900.0
+ZOTERO_STREAM_KEEPALIVE_INTERVAL_S = 25.0
+
 # ---------------------------------------------------------------------------
 # CLI 输入：使用 prompt_toolkit 提供编辑、粘贴、历史记录与显示能力
 # ---------------------------------------------------------------------------
@@ -1173,7 +1177,9 @@ def agent(
                         return content
                     block = (
                         f"\n{marker}\n"
-                        "[zotero_literature_read_hint] Full-text: read_file the markdown path above. "
+                        "[zotero_literature_read_hint] Full-text: grep the markdown path above "
+                        "to locate sections (headings/keywords), then read_file with offset from "
+                        "grep line numbers — do NOT guess offset. "
                         "Do NOT read_file the PDF when this marker is present."
                     )
                     if m:
@@ -1275,13 +1281,20 @@ def agent(
 
             async def _start_zotero_bridge():
                 def _serialize_session_messages(session_key: str) -> list[dict[str, Any]]:
+                    from firefly.zotero_interface.utils import (
+                        is_zotero_user_visible_message,
+                        strip_zotero_user_content_for_session_storage,
+                    )
+
                     session = agent_loop.sessions.get_or_create(session_key)
                     out: list[dict[str, Any]] = []
                     for idx, msg in enumerate(session.messages):
-                        role = str(msg.get("role", ""))
-                        if role not in {"user", "assistant"}:
+                        if not is_zotero_user_visible_message(msg):
                             continue
+                        role = str(msg.get("role", ""))
                         content = str(msg.get("content", "") or "")
+                        if role == "user":
+                            content = strip_zotero_user_content_for_session_storage(content)
                         reasoning = str(msg.get("reasoning_content", "") or "")
                         lit = msg.get("literature_title")
                         lit_s = str(lit).strip() if lit is not None else ""
@@ -1446,6 +1459,7 @@ def agent(
                     try:
                         from firefly.skills.markdown.scripts.pdf_to_markdown import (
                             _assets_look_fragmented,
+                            assets_dir_path,
                             convert_one as _pdf_to_md,
                         )
                     except SystemExit as exc:
@@ -1460,7 +1474,7 @@ def agent(
                         ) from exc
 
                     had_markdown = markdown_path.is_file()
-                    assets_dir = markdown_path.parent / f"{markdown_path.stem}.assets"
+                    assets_dir = assets_dir_path(markdown_path)
                     needs_images = write_images and (
                         not assets_dir.is_dir()
                         or not any(assets_dir.iterdir())
@@ -1721,9 +1735,26 @@ def agent(
                     )
                     await response.prepare(request)
 
+                    write_lock = asyncio.Lock()
+                    stream_done = asyncio.Event()
+
                     async def _write_event(event: dict[str, str]) -> None:
                         packet = f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
-                        await response.write(packet)
+                        async with write_lock:
+                            await response.write(packet)
+
+                    async def _keepalive_ping() -> None:
+                        while not stream_done.is_set():
+                            try:
+                                await asyncio.wait_for(
+                                    stream_done.wait(),
+                                    timeout=ZOTERO_STREAM_KEEPALIVE_INTERVAL_S,
+                                )
+                                break
+                            except asyncio.TimeoutError:
+                                if stream_done.is_set():
+                                    break
+                                await _write_event({"type": "ping"})
 
                     from firefly.bus.events import InboundMessage
                     stream_meta: dict[str, Any] = {
@@ -1741,18 +1772,38 @@ def agent(
                         metadata=stream_meta,
                     ))
 
+                    ping_task: asyncio.Task[None] | None = None
                     try:
                         await _write_event({"type": "start"})
+                        ping_task = asyncio.create_task(_keepalive_ping())
                         while True:
-                            event = await asyncio.wait_for(subscriber.get(), timeout=120.0)
+                            event = await asyncio.wait_for(
+                                subscriber.get(),
+                                timeout=ZOTERO_STREAM_IDLE_TIMEOUT_S,
+                            )
                             await _write_event(event)
                             # "end" 仅表示一个流片段结束（可能随后还有最终 final）
                             # 仅在 final/error 时关闭 SSE，避免丢失 thinking/最终正文。
                             if event.get("type") in {"final", "error"}:
                                 break
                     except asyncio.TimeoutError:
-                        await _write_event({"type": "error", "message": "stream timeout"})
+                        logger.warning(
+                            "Zotero stream idle timeout after {}s for chat {}",
+                            ZOTERO_STREAM_IDLE_TIMEOUT_S,
+                            current_chat_id,
+                        )
+                        await _write_event({
+                            "type": "error",
+                            "message": (
+                                f"stream timeout: no agent output for "
+                                f"{int(ZOTERO_STREAM_IDLE_TIMEOUT_S)}s"
+                            ),
+                        })
                     finally:
+                        stream_done.set()
+                        if ping_task is not None:
+                            ping_task.cancel()
+                            await asyncio.gather(ping_task, return_exceptions=True)
                         _stream_unsubscribe(current_chat_id, subscriber)
                         await response.write_eof()
                     return response

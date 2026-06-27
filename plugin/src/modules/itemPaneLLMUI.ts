@@ -1565,6 +1565,17 @@ export function registerLLMItemPaneSection() {
       /**
        * 发送一轮流式对话（与输入框发送共用）。删除一轮后再次调用可基于最新会话重建上下文。
        */
+      function formatStreamErrorMessage(raw: string): string {
+        const msg = String(raw || "").trim();
+        if (/stream timeout/i.test(msg)) {
+          return "请求超时：Agent 长时间无输出（可能正在读文献或写 docx）。请重启 bridge 后重试，或缩短任务后分批提问。";
+        }
+        if (msg.startsWith("Invalid stream event JSON:")) {
+          return "流式响应格式异常，请重启 FireFly bridge 后重试。";
+        }
+        return msg || "未知错误";
+      }
+
       async function runSendPipeline(opts: {
         message: string;
         mediaPaths: string[];
@@ -1600,10 +1611,12 @@ export function registerLLMItemPaneSection() {
           getTabHistory(activeTabId).push(userRecord);
           activeStreamAbortController = createAbortControllerCompat();
           ztoolkit.log("[llm-ui] sending:", messageWithContext);
+          let streamAssistant: ReturnType<typeof appendAssistantShell> | null = null;
           try {
             await ensureFireFlyBridgeStarted();
             const streamSessionID = getActiveSessionID();
-            const assistant = appendAssistantShell(currentModelLabel);
+            streamAssistant = appendAssistantShell(currentModelLabel);
+            const assistant = streamAssistant;
             let streamedText = "";
             let streamedThinking = "";
             let allowAnswerStream = false;
@@ -1707,10 +1720,11 @@ export function registerLLMItemPaneSection() {
               msg.toLowerCase().includes("aborted") ||
               msg.toLowerCase().includes("cancel");
             if (aborted) {
+              streamAssistant?.clearProgressHighlight();
               appendBubble("system", "已取消发送");
               ztoolkit.log("[llm-ui] send canceled");
             } else {
-              appendBubble("system", `发送失败: ${msg}`);
+              appendBubble("system", `发送失败: ${formatStreamErrorMessage(msg)}`);
               ztoolkit.log("[llm-ui] send failed:", msg);
             }
           }
@@ -1735,7 +1749,7 @@ export function registerLLMItemPaneSection() {
 
       function appendAssistantShell(modelLabelText: string) {
         hideEmptyState();
-        // Inject keyframes once per document for typing dots.
+        // Inject keyframes once per document for typing dots and active task titles.
         const typingStyleId = "ff-llm-typing-style";
         if (!ownerDoc.getElementById(typingStyleId)) {
           const style = ownerDoc.createElement("style");
@@ -1746,9 +1760,54 @@ export function registerLLMItemPaneSection() {
   40% { transform: translateY(-5px) scale(1.22); opacity: 1; }
   70% { transform: translateY(-1px) scale(0.78); opacity: 0.65; }
 }
+@keyframes ffTitleShimmer {
+  0% { background-position: 120% center; }
+  100% { background-position: -20% center; }
+}
+.ff-llm-active-title {
+  display: inline-block;
+  background-image: linear-gradient(
+    105deg,
+    rgba(90, 90, 90, 0.55) 0%,
+    rgba(90, 90, 90, 0.55) 38%,
+    rgba(150, 150, 150, 0.98) 50%,
+    rgba(90, 90, 90, 0.55) 62%,
+    rgba(90, 90, 90, 0.55) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: ffTitleShimmer 2.1s ease-in-out infinite;
+}
+@media (prefers-color-scheme: dark) {
+  .ff-llm-active-title {
+    background-image: linear-gradient(
+      105deg,
+      rgba(170, 170, 170, 0.45) 0%,
+      rgba(170, 170, 170, 0.45) 38%,
+      rgba(230, 230, 230, 0.95) 50%,
+      rgba(170, 170, 170, 0.45) 62%,
+      rgba(170, 170, 170, 0.45) 100%
+    );
+  }
+}
 `;
           ownerDoc.head?.appendChild(style);
         }
+
+        let activeProgressTitleEl: HTMLElement | null = null;
+        const setActiveProgressTitle = (el: HTMLElement | null) => {
+          if (activeProgressTitleEl) {
+            activeProgressTitleEl.classList.remove("ff-llm-active-title");
+          }
+          activeProgressTitleEl = el;
+          if (el) {
+            el.classList.add("ff-llm-active-title");
+          }
+        };
+        const clearActiveProgressTitle = () => setActiveProgressTitle(null);
         const wrap = ownerDoc.createElement("div");
         wrap.style.display = "flex";
         wrap.style.flexDirection = "column";
@@ -1776,11 +1835,13 @@ export function registerLLMItemPaneSection() {
         type ProgressSegment = {
           root: HTMLDivElement;
           thinkingWrap: HTMLDivElement;
+          thinkingTitle: HTMLSpanElement;
           thinkingBody: HTMLDivElement;
           stepsWrap: HTMLDivElement;
           thinkingBuf: string;
           hasToolSteps: boolean;
           setThinkingOpen: (open: boolean) => void;
+          setThinkingLatest: (latest: boolean) => void;
         };
 
         let currentSegment: ProgressSegment | null = null;
@@ -1847,9 +1908,8 @@ export function registerLLMItemPaneSection() {
           return parts.length ? parts : [hint.trim()];
         };
 
-        const appendStepRow = (stepsWrap: HTMLDivElement, label: string) => {
+        const appendStepRow = (stepsWrap: HTMLDivElement, label: string): HTMLSpanElement => {
           const row = ownerDoc.createElement("div");
-          row.textContent = label;
           row.style.fontSize = "12px";
           row.style.lineHeight = "1.55";
           row.style.opacity = "0.62";
@@ -1858,7 +1918,11 @@ export function registerLLMItemPaneSection() {
           (row.style as any).overflowWrap = "anywhere";
           row.style.fontFamily =
             "'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif";
+          const labelSpan = ownerDoc.createElement("span");
+          labelSpan.textContent = label;
+          row.appendChild(labelSpan);
           stepsWrap.appendChild(row);
+          return labelSpan;
         };
 
         const createProgressSegment = (): ProgressSegment => {
@@ -1882,13 +1946,20 @@ export function registerLLMItemPaneSection() {
 
           const arrow = ownerDoc.createElement("span");
           arrow.textContent = "▼";
+          arrow.style.display = "inline-block";
           arrow.style.opacity = "0.65";
           arrow.style.fontSize = "12px";
+          arrow.style.lineHeight = "1";
+          arrow.style.transformOrigin = "center";
+          arrow.style.transition = "transform 220ms cubic-bezier(0.4, 0, 0.2, 1)";
+          arrow.style.transform = "rotate(0deg)";
 
           const tTitle = ownerDoc.createElement("span");
           tTitle.textContent = "Thinking";
-          tTitle.style.fontWeight = "600";
+          tTitle.style.fontWeight = "400";
           tTitle.style.fontSize = "13px";
+          tTitle.style.transition = "font-weight 180ms ease, opacity 180ms ease";
+          tTitle.style.opacity = "0.78";
 
           thinkingHead.append(arrow, tTitle);
 
@@ -1906,10 +1977,21 @@ export function registerLLMItemPaneSection() {
           thinkingBody.textContent = " ";
 
           let open = true;
+          let latest = false;
+          const applyTitleEmphasis = () => {
+            const active = latest && open;
+            tTitle.style.fontWeight = active ? "600" : "400";
+            tTitle.style.opacity = active ? "1" : "0.78";
+          };
+          const setLatest = (v: boolean) => {
+            latest = v;
+            applyTitleEmphasis();
+          };
           const setOpen = (v: boolean) => {
             open = v;
             thinkingBody.style.display = open ? "block" : "none";
-            arrow.textContent = open ? "▼" : "▶";
+            arrow.style.transform = open ? "rotate(0deg)" : "rotate(-90deg)";
+            applyTitleEmphasis();
           };
           thinkingHead.addEventListener("click", () => setOpen(!open));
 
@@ -1928,11 +2010,13 @@ export function registerLLMItemPaneSection() {
           return {
             root,
             thinkingWrap,
+            thinkingTitle: tTitle,
             thinkingBody,
             stepsWrap,
             thinkingBuf: "",
             hasToolSteps: false,
             setThinkingOpen: setOpen,
+            setThinkingLatest: setLatest,
           };
         };
 
@@ -1942,8 +2026,12 @@ export function registerLLMItemPaneSection() {
         };
 
         const startNewSegment = () => {
-          collapseSegmentThinking(currentSegment);
+          if (currentSegment) {
+            currentSegment.setThinkingLatest(false);
+            collapseSegmentThinking(currentSegment);
+          }
           currentSegment = createProgressSegment();
+          currentSegment.setThinkingLatest(true);
           progressSegments.push(currentSegment);
         };
 
@@ -1965,6 +2053,9 @@ export function registerLLMItemPaneSection() {
           seg.thinkingWrap.style.display = "block";
           seg.thinkingBody.textContent = formatThinkingParagraphs(seg.thinkingBuf);
           seg.setThinkingOpen(true);
+          if (!seg.hasToolSteps) {
+            setActiveProgressTitle(seg.thinkingTitle);
+          }
           setTypingVisible(false);
         };
 
@@ -1972,10 +2063,11 @@ export function registerLLMItemPaneSection() {
           const seg = ensureSegment();
           const hadThinking = !!seg.thinkingBuf.trim();
           const lines = splitToolHintLines(hint);
+          let lastLabelEl: HTMLSpanElement | null = null;
           for (const line of lines) {
             const label = formatToolStepLabel(line);
             if (!label) continue;
-            appendStepRow(seg.stepsWrap, label);
+            lastLabelEl = appendStepRow(seg.stepsWrap, label);
           }
           if (seg.stepsWrap.childElementCount > 0) {
             seg.stepsWrap.style.display = "flex";
@@ -1983,11 +2075,15 @@ export function registerLLMItemPaneSection() {
               collapseSegmentThinking(seg);
             }
             seg.hasToolSteps = true;
+            if (lastLabelEl) {
+              setActiveProgressTitle(lastLabelEl);
+            }
             setTypingVisible(false);
           }
         };
 
         const finalizeProgressThinking = (fallbackThinking: string) => {
+          clearActiveProgressTitle();
           const tail = String(fallbackThinking || "").trim();
           if (tail && currentSegment && !currentSegment.thinkingBuf.trim()) {
             currentSegment.thinkingBuf = tail;
@@ -2004,11 +2100,9 @@ export function registerLLMItemPaneSection() {
           if (!progressLane.childElementCount) {
             progressLane.style.display = "none";
           } else {
-            for (let i = 0; i < progressSegments.length - 1; i++) {
+            for (let i = 0; i < progressSegments.length; i++) {
+              progressSegments[i]!.setThinkingLatest(false);
               collapseSegmentThinking(progressSegments[i]!);
-            }
-            if (currentSegment) {
-              collapseSegmentThinking(currentSegment);
             }
           }
         };
@@ -2029,6 +2123,7 @@ export function registerLLMItemPaneSection() {
           currentSegment!.thinkingBuf = val;
           currentSegment!.thinkingWrap.style.display = "block";
           currentSegment!.thinkingBody.textContent = formatThinkingParagraphs(val);
+          currentSegment!.setThinkingLatest(false);
           currentSegment!.setThinkingOpen(false);
           setTypingVisible(false);
         };
@@ -2191,6 +2286,9 @@ export function registerLLMItemPaneSection() {
         const setAnswerText = (text: string) => {
           const val = String(text || "");
           const has = !!val.trim();
+          if (has) {
+            clearActiveProgressTitle();
+          }
           setTypingVisible(!has);
           if (has) {
             ensureKatexStylesheet(ownerDoc);
@@ -2322,6 +2420,7 @@ export function registerLLMItemPaneSection() {
           appendThinkingDelta,
           appendToolStep,
           finalizeProgressThinking,
+          clearProgressHighlight: clearActiveProgressTitle,
           setAnswerText,
           setTypingVisible,
           setAssistantSessionMessageIndex,

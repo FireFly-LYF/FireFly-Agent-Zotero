@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from firefly.agent.temp_workspace import (
+from firefly.agent.temp import (
     begin_agent_temp_turn,
     cleanup_agent_temp_turn,
     get_agent_temp_dir,

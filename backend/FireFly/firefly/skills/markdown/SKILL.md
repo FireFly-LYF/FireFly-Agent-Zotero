@@ -21,6 +21,25 @@ version: 1.0.0
 
 脚本仍可用于批量离线建库；对话内检索优先用上述工具。
 
+## 在长 markdown 中定位章节
+
+`raw/markdown/*.md` 的行号与论文章节号、PDF 页码**不对应**。不要用 `read_file` 的 `offset` 凭感觉跳读（例如 `offset=100` 并不等于第四章）。
+
+推荐流程：
+
+1. **`grep`**：`path` 设为该 `.md`，`output_mode=content`，用标题或关键词（如 `仿真实验`、`## **4**`、`实验步骤`）。
+2. 根据 grep 输出的**行号**，再 `read_file(path, offset=行号, limit=…)` 精读该段。
+3. 若问题可由 RAG 覆盖，优先 **`rag_search`**，减少手工翻页。
+
+```text
+# 错误：猜 offset
+read_file(path, offset=200, limit=500)
+
+# 正确：先定位再读
+grep(pattern="仿真实验", path=path, output_mode="content")
+read_file(path, offset=<grep 行号>, limit=400)
+```
+
 常用示例：
 
 ```bash

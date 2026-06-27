@@ -1,0 +1,219 @@
+"""Security tests for document-layer hardening (V1–V4)."""
+
+from __future__ import annotations
+
+import io
+import struct
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from docx_mcp.document import DocxDocument
+from docx_mcp.document.errors import DocxMcpError, ErrCode
+
+# ── V4: BadZipFile ────────────────────────────────────────────────────────────
+
+
+def test_corrupt_zip_raises_docxmcperror(tmp_path: Path):
+    """A file with garbage bytes raises DocxMcpError(OOXML_INVALID), not BadZipFile."""
+    bad = tmp_path / "bad.docx"
+    bad.write_bytes(b"this is not a zip file at all")
+    doc = DocxDocument(str(bad))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.OOXML_INVALID
+
+
+def test_truncated_zip_raises_docxmcperror(tmp_path: Path):
+    """A truncated ZIP raises DocxMcpError(OOXML_INVALID)."""
+    bad = tmp_path / "truncated.docx"
+    bad.write_bytes(b"PK\x03\x04")  # ZIP magic but incomplete
+    doc = DocxDocument(str(bad))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.OOXML_INVALID
+
+
+def test_empty_file_raises_docxmcperror(tmp_path: Path):
+    """An empty file raises DocxMcpError(OOXML_INVALID)."""
+    bad = tmp_path / "empty.docx"
+    bad.write_bytes(b"")
+    doc = DocxDocument(str(bad))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.OOXML_INVALID
+
+
+# ── V1: ZipSlip ───────────────────────────────────────────────────────────────
+
+
+def _make_zipslip_docx(tmp_path: Path, evil_entry: str) -> Path:
+    """Build a fake DOCX (valid ZIP structure) with a traversal entry name."""
+    path = tmp_path / "zipslip.docx"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("_rels/.rels", "<Relationships/>")
+        zf.writestr("word/document.xml", "<document/>")
+        zf.writestr(evil_entry, "pwned")
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_zipslip_dotdot_raises(tmp_path: Path):
+    """ZIP entry with ../ path raises DocxMcpError(UNSAFE_PATH)."""
+    path = _make_zipslip_docx(tmp_path, "../../evil.txt")
+    doc = DocxDocument(str(path))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.UNSAFE_PATH
+
+
+def test_zipslip_absolute_raises(tmp_path: Path):
+    """ZIP entry with absolute path raises DocxMcpError(UNSAFE_PATH)."""
+    path = _make_zipslip_docx(tmp_path, "/etc/cron.d/evil")
+    doc = DocxDocument(str(path))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.UNSAFE_PATH
+
+
+# ── V2: XXE ───────────────────────────────────────────────────────────────────
+
+
+def _make_xxe_docx(tmp_path: Path) -> Path:
+    """DOCX with an XXE payload in document.xml."""
+    path = tmp_path / "xxe.docx"
+    evil_xml = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        "<document>&xxe;</document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("_rels/.rels", "<Relationships/>")
+        zf.writestr("word/document.xml", evil_xml)
+        zf.writestr("word/_rels/document.xml.rels", "<Relationships/>")
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_xxe_entity_not_resolved(tmp_path: Path):
+    """XXE payload in document.xml must not resolve external entities."""
+    from lxml import etree
+
+    path = _make_xxe_docx(tmp_path)
+    doc = DocxDocument(str(path))
+    doc.open()
+    tree = doc._trees.get("word/document.xml")
+    if tree is not None:
+        content = etree.tostring(tree).decode()
+        assert "root:" not in content, "XXE entity was resolved — /etc/passwd leaked"
+    doc.close()
+
+
+# ── V3: ZIP bomb ─────────────────────────────────────────────────────────────
+
+
+def _make_too_many_entries_docx(tmp_path: Path, n: int) -> Path:
+    """DOCX ZIP with n entries (entry count bomb)."""
+    path = tmp_path / "bomb_entries.docx"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        for i in range(n):
+            zf.writestr(f"word/junk{i}.bin", b"x")
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_too_many_zip_entries_raises(tmp_path: Path):
+    """DOCX with >10 000 entries raises DocxMcpError(OOXML_INVALID)."""
+    path = _make_too_many_entries_docx(tmp_path, 10_001)
+    doc = DocxDocument(str(path))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.OOXML_INVALID
+
+
+def _make_declared_size_bomb_docx(tmp_path: Path) -> Path:
+    """DOCX ZIP that claims huge uncompressed size via crafted central directory."""
+    path = tmp_path / "bomb_size.docx"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("_rels/.rels", "<Relationships/>")
+        zf.writestr("word/document.xml", "<document/>")
+    raw = bytearray(buf.getvalue())
+    # Patch uncompressed size in each central directory entry (PK\x01\x02)
+    # Central directory layout: sig(4) ver_by(2) ver_need(2) flags(2) comp(2)
+    #   mod_time(2) mod_date(2) crc32(4) comp_size(4) uncomp_size(4@offset+24)
+    cd_sig = b"PK\x01\x02"
+    off = 0
+    while True:
+        idx = raw.find(cd_sig, off)
+        if idx == -1:
+            break
+        # Patch uncompressed size to 200 MB per entry (3 entries = 600 MB total)
+        struct.pack_into("<I", raw, idx + 24, 200 * 1024 * 1024)
+        off = idx + 1
+    path.write_bytes(bytes(raw))
+    return path
+
+
+def test_zip_bomb_declared_size_raises(tmp_path: Path):
+    """DOCX claiming >500 MB uncompressed raises DocxMcpError(OOXML_INVALID)."""
+    path = _make_declared_size_bomb_docx(tmp_path)
+    doc = DocxDocument(str(path))
+    with pytest.raises(DocxMcpError) as exc_info:
+        doc.open()
+    assert exc_info.value.code == ErrCode.OOXML_INVALID
+
+
+# ── V6: output_path traversal ────────────────────────────────────────────────
+
+
+def _make_open_doc(tmp_path: Path) -> DocxDocument:
+    """Return an open DocxDocument."""
+    from tests.conftest import _build_fixture
+
+    path = tmp_path / "src.docx"
+    _build_fixture(path)
+    doc = DocxDocument(str(path))
+    doc.open()
+    return doc
+
+
+def test_save_traversal_path_raises(tmp_path: Path):
+    """save() with a traversal output_path raises ValueError."""
+    doc = _make_open_doc(tmp_path)
+    with pytest.raises(ValueError):
+        doc.save("../../etc/passwd.docx")
+    doc.close()
+
+
+def test_save_non_docx_suffix_raises(tmp_path: Path):
+    """save() with a non-.docx output_path raises ValueError."""
+    doc = _make_open_doc(tmp_path)
+    with pytest.raises(ValueError):
+        doc.save(str(tmp_path / "out.pdf"))
+    doc.close()
+
+
+def test_copy_document_traversal_raises(tmp_path: Path):
+    """copy_document() with a traversal output_path raises ValueError."""
+    doc = _make_open_doc(tmp_path)
+    with pytest.raises(ValueError):
+        doc.copy_document("../../etc/evil.docx")
+    doc.close()
+
+
+def test_save_valid_path_works(tmp_path: Path):
+    """save() with a valid .docx path succeeds."""
+    doc = _make_open_doc(tmp_path)
+    out = str(tmp_path / "out.docx")
+    result = doc.save(out, backup=False)
+    assert "path" in result
+    doc.close()

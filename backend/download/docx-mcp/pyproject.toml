@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docx-mcp-server"
+version = "0.7.4"
+description = "MCP server for creating, reading, and editing Word (.docx) documents with markdown conversion, track changes, comments, footnotes, tables, images, sections, and structural validation"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "SecurityRonin" }]
+keywords = ["mcp", "docx", "word", "track-changes", "comments", "footnotes", "ooxml"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup :: XML",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "lxml>=4.9.0",
+    "mistune>=3.0",
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "spacy>=3.7,<4",
+]
+
+[project.optional-dependencies]
+equations = ["latex2mathml>=3.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "pre-commit>=4.0",
+    "hypothesis>=6.0",
+]
+
+[project.scripts]
+docx-mcp = "docx_mcp.cli:main"
+docx-mcp-server = "docx_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/SecurityRonin/docx-mcp"
+Repository = "https://github.com/SecurityRonin/docx-mcp"
+Issues = "https://github.com/SecurityRonin/docx-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["docx_mcp"]
+
+# ── Ruff ────────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"docx_mcp/document/creation.py" = ["E501"]  # inline XML templates
+"docx_mcp/document/clausediff.py" = ["E501"]  # long docstring lines
+"docx_mcp/server.py" = ["E501"]  # long docstring lines
+"tests/conftest.py" = ["E501"]  # inline XML templates
+"tests/test_tracks.py" = ["E501"]  # complex assertion expressions
+"tests/test_creation.py" = ["E501"]  # complex assertion expressions
+"tests/test_table_extensions.py" = ["E501"]  # inline XML templates
+
+# ── Pytest ──────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# ── Coverage ────────────────────────────────────────────────────────────────
+
+[tool.coverage.run]
+source = ["docx_mcp"]
+omit = ["docx_mcp/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__",
+]

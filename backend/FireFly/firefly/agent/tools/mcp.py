@@ -72,6 +72,56 @@ def _normalize_schema_for_openai(schema: Any) -> dict[str, Any]:
     return normalized
 
 
+_MCP_WRITE_PREFIXES = (
+    "create_",
+    "save_",
+    "delete_",
+    "replace_",
+    "insert_",
+    "update_",
+    "set_",
+    "open_",
+    "close_",
+    "add_",
+    "remove_",
+    "write_",
+    "append_",
+    "apply_",
+    "merge_",
+)
+_MCP_READ_PREFIXES = (
+    "get_",
+    "search_",
+    "list_",
+    "read_",
+    "find_",
+    "audit_",
+    "validate_",
+    "check_",
+    "fetch_",
+)
+
+
+def infer_mcp_tool_read_only(tool_def: Any) -> bool:
+    """推断 MCP 工具是否只读、可与其他只读工具同轮并行。"""
+    annotations = getattr(tool_def, "annotations", None)
+    if annotations is not None:
+        hint = getattr(annotations, "readOnlyHint", None)
+        if hint is True:
+            return True
+        if hint is False:
+            return False
+
+    name = str(getattr(tool_def, "name", "") or "").strip().lower()
+    if not name:
+        return False
+    if any(name.startswith(prefix) for prefix in _MCP_WRITE_PREFIXES):
+        return False
+    if any(name.startswith(prefix) for prefix in _MCP_READ_PREFIXES):
+        return True
+    return False
+
+
 class MCPToolWrapper(Tool):
     """将单个 MCP 服务器工具封装为 firefly Tool。"""
 
@@ -83,6 +133,7 @@ class MCPToolWrapper(Tool):
         raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._parameters = _normalize_schema_for_openai(raw_schema)
         self._tool_timeout = tool_timeout
+        self._read_only = infer_mcp_tool_read_only(tool_def)
 
     @property
     def name(self) -> str:
@@ -95,6 +146,10 @@ class MCPToolWrapper(Tool):
     @property
     def parameters(self) -> dict[str, Any]:
         return self._parameters
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
 
     async def execute(self, **kwargs: Any) -> str:
         from mcp import types

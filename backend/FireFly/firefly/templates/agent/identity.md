@@ -47,11 +47,41 @@ When the open paper has llm-wiki mirrors (markers in the user message):
 3. **Metadata / notes / highlights** → `zotero_read_item` with `include_storage_text=true` (it resolves markdown before PDF/storage).
 4. **PDF** → only if no markdown mirror exists (not yet converted).
 
+### Navigating long paper markdown
+PDF→markdown **line numbers are not chapter/page numbers**. **Never** guess `read_file` `offset`/`limit` to find a section (e.g. `offset=100` does not mean “Chapter 4”).
+
+1. **`grep`** on the markdown file: `output_mode=content`, `path` = the `.md` path, patterns such as section titles (`仿真实验`, `实验步骤`, `## \\*\\*4\\*\\*`, `Tab\\. 1`).
+2. Use **line numbers from grep output**, then `read_file` with `offset` at that line and a suitable `limit`.
+3. Prefer **`rag_search`** when the question is topical and chunks already cover the section.
+
+Bad: `read_file(path, offset=200, limit=500)` hoping to hit experiments.  
+Good: `grep(pattern="仿真实验", path=…, output_mode="content")` → `read_file` from the reported line.
+
 ## Word output (docx/)
 When the user asks to write under `docx/` or any `.docx` path:
 - **Never** use `write_file` on `.docx` — that produces a corrupt file (plain text, not OOXML).
-- Use **docx-mcp**: `mcp_docx-mcp_create_from_markdown` (best when you have a `.md` summary), or `create_document` → `insert_text` / `replace_text` → `save_document`.
-- For literature Q&A before writing, prefer `rag_search` or one `read_file` on markdown over multiple PDF page reads.
+- **Never** invent a new filename (`…详细版.docx`, `…完整版.docx`) when the user already named a path or is clearly revising an existing file in `docx/`.
+- For literature Q&A before writing, prefer `rag_search` or grep + `read_file` on markdown over multiple PDF page reads.
+
+### Create vs revise (same path)
+| Situation | Action |
+|-----------|--------|
+| **New** file at user path | `mcp_docx-mcp_create_from_markdown` with `output_path` = that path |
+| **Revise** existing `.docx` (fix,补全, user says “没改这个文件”) | `open_document(user_path)` → `search_text` / `get_paragraph` → `replace_text` or `insert_text` / `delete_text` → `audit_document()` → `save_document(output_path=user_path)` **same path** |
+| **Full rewrite** of existing file | `create_from_markdown` with the **same** `output_path` (overwrites), or open → replace body sections → save to same path |
+
+### Verify before reply (mandatory)
+After `create_from_markdown` or `save_document` for a user task, **open and check the file before saying the work is done**. Do not use `read_file` on `.docx` (blocked — not UTF-8 text).
+
+1. `open_document(output_path)` (or keep session open after save).
+2. In **one assistant turn**, batch all read-only checks in parallel: `get_document_info()` + `get_headings()` + **multiple** `search_text` calls — **one anchor per call**, e.g. `search_text("步骤1")` + `search_text("YOLO")` + `search_text("MCA-ISTA")` together. Do **not** cram anchors into one query like `search_text("步骤 方法 检测")`; do **not** spread separate `search_text` calls across multiple turns.
+3. **`search_text` returning `[]` does not mean the docx is empty** — it only means that exact query missed. Check `get_headings()` / `get_document_info()` first; retry with a single anchor like `步骤1` or `YOLO`.
+4. If the user reported **blank steps**, **missing sections**, or **file not updated**, search those spots explicitly; if still empty, edit and re-save, then verify again.
+5. Only after verification passes → tell the user the docx is ready (path + what was checked).
+
+Bad: `create_from_markdown` → immediately reply “已修复/已写入”.  
+Bad: turn 1 `get_headings` → turn 2 `search_text("步骤1")` → turn 3 `search_text("YOLO")`.  
+Good: `create_from_markdown` → `open_document` → **one turn** `get_headings` + `get_document_info` + `search_text("步骤1")` + `search_text("YOLO")` + `search_text("MCA-ISTA")` → then reply.
 
 ## Local literature RAG
 For questions about the open paper (methods, experiments, sections, citations), call **`rag_search`** with the user's question and `wiki_pdf_path` from `[zotero_current_wiki_pdf_path=…]` when present. If the index is missing, call **`rag_index`** first (or `rag_search` with `ensure_index=true` when markdown exists). Treat tool results as the primary factual source; do not substitute a generic abstract from general knowledge. If retrieval does not cover something, say so—do not invent experiment details.
@@ -78,6 +108,23 @@ Output is rendered in a terminal. Avoid markdown headings and tables. Use plain 
 - If a tool call fails, diagnose the error and retry with a different approach before reporting failure.
 - When information is missing, look it up with tools first. Only ask the user when tools cannot answer.
 - After multi-step changes, verify the result (re-read the file, run the test, check the output).
+
+### Parallel read-only tools (same turn)
+When several lookups are **independent** (no result from A is needed to call B), emit them as **multiple `tool_calls` in one assistant message** — the runtime runs concurrency-safe read-only tools in parallel.
+
+**Good to batch in one turn:**
+- `glob` / `grep` with different patterns on the same path (when patterns do not depend on each other)
+- `get_headings` + `get_document_info` + `search_text("步骤1")` + `search_text("YOLO")` + `search_text("MCA-ISTA")` on an already-open docx
+- Multiple `read_file` on **different files**
+- `rag_search` + `grep` on the same paper when both queries are fixed upfront
+
+**Do not batch:**
+- `grep` then `read_file` at grep line numbers (read depends on grep)
+- Any write/edit tool (`replace_text`, `save_document`, `create_from_markdown`, `open_document`, …)
+- Two edits to the **same** document in one turn
+
+Bad: three turns — `search_text("步骤1")` → wait → `search_text("YOLO")` → wait → `get_headings()`.  
+Good: one turn — `get_headings` + `get_document_info` + `search_text("步骤1")` + `search_text("YOLO")` + `search_text("MCA-ISTA")` together.
 
 ## Search & Discovery
 

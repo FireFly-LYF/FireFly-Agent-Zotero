@@ -51,7 +51,18 @@
 4、现有问题: Zotero多轮工具调用未展示, Agent运行时间较长。
 
 2026.6.26 issue
-1、对 markdown 用 grep 定位，不要凭 offset 猜;
-2、用户指定路径时，用同一路径 create_from_markdown 或 docx 编辑工具覆盖;
-3、考虑不把带 tool_calls 的超长 assistant 草稿写入用户可见历史，或只存摘要;
-4、写 docx 后 read_file / 打开检查是否真有空白段落，再回复用户
+1、对 markdown 用 grep 定位，不要凭 offset 猜;  
+2、用户指定路径时，用同一路径 create_from_markdown 或 docx 编辑工具覆盖;   
+3、考虑不把带 tool_calls 的超长 assistant 草稿写入用户可见历史，或只存摘要;   
+4、写 docx 后 read_file / 打开检查是否真有空白段落，再回复用户。 
+
+2026.6.27
+1、Summarizer整轮任务结束后只调用一次，无工具时直接流式输出 agent 回复; 
+2、工作流中明确 get_headings + search_text 等只读操作应同轮并行;  
+3、修复search_text regex=false字串匹配时 “|” 导致空结果的问题。   
+
+issue：
+1、模型不能够并行调用工具，导致任务时间很长; 
+2、前端展示非常僵硬，动态展示尚未实现; 
+3、thinking文本存在首行缩进不统一的问题;
+4、文本样式不美观，可参考llm_for_zotero。

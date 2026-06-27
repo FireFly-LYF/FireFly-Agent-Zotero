@@ -288,6 +288,8 @@ class GrepTool(_SearchTool):
             "Default output_mode is files_with_matches (file paths only); "
             "use content mode for matching lines with context (max 20 lines before/after; "
             "larger values are clamped automatically). "
+            "For llm-wiki paper markdown, grep headings/keywords with output_mode=content "
+            "and path set to the .md file before read_file — line numbers are not chapter numbers. "
             "PDF extracts and tool-result cache files are normalized for hyphenated line breaks. "
             "Skips binary and files >2 MB. Supports glob/type filtering."
         )

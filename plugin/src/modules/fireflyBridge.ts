@@ -36,6 +36,8 @@ const HEALTH_RETRY = 40;
 const HEALTH_INTERVAL_MS = 500;
 const HEALTH_TIMEOUT_MS = 2000;
 const SEND_TIMEOUT_MS = 15000;
+/** SSE 建立连接等待时间（首包）；流式正文由后端 idle 超时控制（默认 900s）。 */
+const BRIDGE_STREAM_CONNECT_TIMEOUT_MS = 120_000;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -237,7 +239,7 @@ export async function streamFromFireFly(
       headers: { "Content-Type": "application/json" },
       body,
     },
-    SEND_TIMEOUT_MS * 4,
+    BRIDGE_STREAM_CONNECT_TIMEOUT_MS,
     abortSignal,
   );
   if (!res.ok) {
@@ -263,30 +265,37 @@ export async function streamFromFireFly(
       buffer = buffer.slice(sepIdx + 2);
       if (block.startsWith("data:")) {
         const raw = block.slice(5).trim();
+        if (!raw) {
+          sepIdx = buffer.indexOf("\n\n");
+          continue;
+        }
+        let event: {
+          type?: string;
+          delta?: string;
+          content?: string;
+          message?: string;
+          resuming?: string | boolean;
+        };
         try {
-          const event = JSON.parse(raw) as {
-            type?: string;
-            delta?: string;
-            content?: string;
-            message?: string;
-            resuming?: string | boolean;
-          };
-          if (event.type === "delta" && event.delta) {
-            onDelta(event.delta);
-          } else if (event.type === "thinking_delta" && event.delta) {
-            onThinkingDelta?.(event.delta);
-          } else if (event.type === "tool_step" && event.content) {
-            onToolStep?.(event.content);
-          } else if (event.type === "end") {
-            const resuming = event.resuming === true || event.resuming === "true";
-            onStreamEnd?.(resuming);
-          } else if (event.type === "final" && event.content) {
-            onFinal?.(event.content);
-          } else if (event.type === "error") {
-            throw new Error(event.message || "unknown stream error");
-          }
-        } catch (e) {
-          throw new Error(`Invalid stream event: ${String(e)}`);
+          event = JSON.parse(raw);
+        } catch (parseErr) {
+          throw new Error(`Invalid stream event JSON: ${String(parseErr)}`);
+        }
+        if (event.type === "delta" && event.delta) {
+          onDelta(event.delta);
+        } else if (event.type === "thinking_delta" && event.delta) {
+          onThinkingDelta?.(event.delta);
+        } else if (event.type === "tool_step" && event.content) {
+          onToolStep?.(event.content);
+        } else if (event.type === "end") {
+          const resuming = event.resuming === true || event.resuming === "true";
+          onStreamEnd?.(resuming);
+        } else if (event.type === "final" && event.content) {
+          onFinal?.(event.content);
+        } else if (event.type === "error") {
+          throw new Error(event.message || "unknown stream error");
+        } else if (event.type === "ping" || event.type === "start") {
+          // keepalive / stream opened
         }
       }
       sepIdx = buffer.indexOf("\n\n");

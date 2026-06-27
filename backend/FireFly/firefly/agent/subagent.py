@@ -149,6 +149,7 @@ class SubagentManager:
                 max_iterations_message="Task completed but no final response was generated.",
                 error_message=None,
                 fail_on_tool_error=True,
+                concurrent_tools=True,
             ))
             if result.stop_reason == "tool_error":
                 await self._announce_result(

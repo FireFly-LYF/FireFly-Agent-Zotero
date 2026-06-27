@@ -11,7 +11,7 @@ from firefly.agent.tools.base import Tool, tool_parameters
 from firefly.agent.tools.schema import BooleanSchema, IntegerSchema, StringSchema, tool_parameters_schema
 from firefly.agent.tools import file_state
 from firefly.utils.helpers import build_image_content_blocks, detect_image_mime, is_tool_result_cache_path
-from firefly.agent.temp_workspace import register_agent_temp_file, validate_scratch_write_path
+from firefly.agent.temp import register_agent_temp_file, validate_scratch_write_path
 from firefly.config.paths import get_media_dir
 from firefly.skills.markdown.scripts.rag_paths import llm_wiki_markdown_mirror_for_pdf
 
@@ -220,6 +220,8 @@ class ReadFileTool(_FsTool):
             "For llm-wiki literature, prefer the mirrored "
             "backend/llm-wiki/raw/markdown/*.md (or [zotero_current_wiki_markdown_path=…]); "
             "do not read raw/pdf/*.pdf when the .md mirror exists. "
+            "For long markdown: grep section headings/keywords first to get line numbers, "
+            "then read_file with offset — never guess offset from chapter or PDF page numbers. "
             "Use offset and limit for large files; use pages='1-5' only when no markdown mirror. "
             "Cannot read non-image binary files. "
             "Reads exceeding ~128K chars are truncated."
@@ -409,7 +411,9 @@ class WriteFileTool(_FsTool):
                     f"Error: Cannot write Word binary format with write_file ({fp.name}). "
                     "Use docx-mcp instead: mcp_docx-mcp_create_from_markdown (from .md), "
                     "mcp_docx-mcp_create_document, then mcp_docx-mcp_insert_text / replace_text "
-                    "and mcp_docx-mcp_save_document. Plain text or Markdown is not a valid .docx."
+                    "and mcp_docx-mcp_save_document. After writing, open_document + get_headings/search_text "
+                    "to verify content before telling the user the task is done. "
+                    "Plain text or Markdown is not a valid .docx."
                 )
             if err := self._guard_scratch_write(fp):
                 return err

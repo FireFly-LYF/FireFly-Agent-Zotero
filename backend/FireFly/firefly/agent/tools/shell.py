@@ -14,7 +14,7 @@ from loguru import logger
 from firefly.agent.tools.base import Tool, tool_parameters
 from firefly.agent.tools.sandbox import wrap_command
 from firefly.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
-from firefly.agent.temp_workspace import get_exec_cache_dir, remove_agent_temp_file
+from firefly.agent.temp import get_exec_cache_dir, remove_agent_temp_file
 from firefly.config.paths import get_media_dir
 
 _IS_WINDOWS = sys.platform == "win32"

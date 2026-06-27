@@ -15,11 +15,14 @@ from loguru import logger
 
 from firefly.agent.autocompact import AutoCompact
 from firefly.agent.context import ContextBuilder
-from firefly.zotero_interface.utils import strip_zotero_user_content_for_session_storage
+from firefly.zotero_interface.utils import (
+    compact_tool_call_assistant_for_storage,
+    strip_zotero_user_content_for_session_storage,
+)
 from firefly.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from firefly.agent.memory import Consolidator, Dream
 from firefly.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunSpec, AgentRunner
-from firefly.agent.reply_summarizer import replace_last_assistant_text, summarize_zotero_reply
+from firefly.agent.summarizer import collect_zotero_turn_user_query, finalize_zotero_stream_reply, replace_last_assistant_text
 from firefly.agent.subagent import SubagentManager
 from firefly.agent.tools.cron import CronTool
 from firefly.agent.skills import BUILTIN_SKILLS_DIR
@@ -75,6 +78,8 @@ def _sanitize_history_for_llm(
             content = str(msg["content"])
             if len(content) > ZOTERO_HISTORY_TOOL_MAX_CHARS:
                 msg["content"] = truncate_text_fn(content, ZOTERO_HISTORY_TOOL_MAX_CHARS)
+        elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+            msg = compact_tool_call_assistant_for_storage(msg)
         out.append(msg)
     return out
 
@@ -606,7 +611,7 @@ class AgentLoop:
         try:
             async with lock, gate:
                 try:
-                    on_stream = on_stream_end = None
+                    on_stream = on_stream_end = on_answer_stream = None
                     is_zotero_stream = msg.metadata.get("_source") == "zotero_stream"
                     if msg.metadata.get("_wants_stream"):
                         # 将一次回答拆分为独立的流式片段。
@@ -620,6 +625,17 @@ class AgentLoop:
                             # Zotero 插件：执行期仅展示 thinking/工具进度，正文由总结 agent 流式输出。
                             if is_zotero_stream:
                                 return
+                            meta = dict(msg.metadata or {})
+                            meta["_stream_delta"] = True
+                            meta["_stream_id"] = _current_stream_id()
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=msg.channel, chat_id=msg.chat_id,
+                                content=delta,
+                                metadata=meta,
+                            ))
+
+                        async def on_answer_stream(delta: str) -> None:
+                            """Zotero 总结 agent 专用：始终推送正文 delta。"""
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True
                             meta["_stream_id"] = _current_stream_id()
@@ -655,6 +671,7 @@ class AgentLoop:
                     response = await self._process_message(
                         msg,
                         on_stream=on_stream,
+                        on_answer_stream=on_answer_stream,
                         on_reasoning_stream=on_reasoning_stream if msg.metadata.get("_wants_stream") else None,
                         on_stream_end=on_stream_end,
                         pending_queue=pending,
@@ -724,6 +741,7 @@ class AgentLoop:
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_answer_stream: Callable[[str], Awaitable[None]] | None = None,
         on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         pending_queue: asyncio.Queue | None = None,
@@ -866,19 +884,23 @@ class AgentLoop:
 
         if (
             msg.metadata.get("_source") == "zotero_stream"
-            and on_stream is not None
+            and on_answer_stream is not None
             and stop_reason != "error"
         ):
-            user_query = strip_zotero_user_content_for_session_storage(msg.content)
-            if not user_query.strip():
-                user_query = msg.content
-            summarized = await summarize_zotero_reply(
+            user_query = collect_zotero_turn_user_query(
+                msg.content,
+                all_msgs,
+                had_injections=had_injections,
+            )
+            # 整轮 agent 任务（全部工具迭代）结束后，仅调用一次 summarizer。
+            summarized = await finalize_zotero_stream_reply(
                 self.provider,
                 self.model,
                 user_query=user_query,
                 tool_events=tool_events,
                 agent_draft=final_content or "",
-                on_stream=on_stream,
+                on_answer_stream=on_answer_stream,
+                on_stream_end=on_stream_end,
             )
             if summarized.strip():
                 final_content = summarized
@@ -987,6 +1009,9 @@ class AgentLoop:
                     if not filtered:
                         continue
                     entry["content"] = filtered
+            elif role == "assistant":
+                if literature_title:
+                    entry = compact_tool_call_assistant_for_storage(entry)
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     # 去除整段 runtime-context（含会话摘要）。

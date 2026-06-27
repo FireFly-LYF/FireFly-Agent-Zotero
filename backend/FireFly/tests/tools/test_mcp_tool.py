@@ -12,6 +12,7 @@ from firefly.agent.tools.mcp import (
     MCPPromptWrapper,
     MCPToolWrapper,
     connect_mcp_servers,
+    infer_mcp_tool_read_only,
 )
 from firefly.agent.tools.registry import ToolRegistry
 from firefly.config.schema import MCPServerConfig
@@ -176,6 +177,44 @@ def test_wrapper_normalizes_nullable_property_anyof() -> None:
         "description": "optional name",
         "nullable": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("search_text", True),
+        ("get_headings", True),
+        ("get_document_info", True),
+        ("audit_document", True),
+        ("replace_text", False),
+        ("open_document", False),
+        ("save_document", False),
+        ("create_from_markdown", False),
+    ],
+)
+def test_infer_mcp_tool_read_only_by_name(tool_name: str, expected: bool) -> None:
+    tool_def = SimpleNamespace(name=tool_name, annotations=None)
+    assert infer_mcp_tool_read_only(tool_def) is expected
+
+
+def test_infer_mcp_tool_read_only_respects_annotation_hint() -> None:
+    tool_def = SimpleNamespace(
+        name="custom_tool",
+        annotations=SimpleNamespace(readOnlyHint=True),
+    )
+    assert infer_mcp_tool_read_only(tool_def) is True
+
+
+def test_mcp_tool_wrapper_exposes_read_only_flag() -> None:
+    tool_def = SimpleNamespace(
+        name="search_text",
+        description="search",
+        inputSchema={"type": "object", "properties": {}},
+        annotations=None,
+    )
+    wrapper = MCPToolWrapper(SimpleNamespace(call_tool=None), "docx-mcp", tool_def)
+    assert wrapper.read_only is True
+    assert wrapper.concurrency_safe is True
 
 
 @pytest.mark.asyncio

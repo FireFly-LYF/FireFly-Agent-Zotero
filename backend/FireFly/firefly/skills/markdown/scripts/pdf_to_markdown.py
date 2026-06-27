@@ -12,6 +12,7 @@ Supports both batch mode and single-file mode.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 try:
+    import pymupdf
     import pymupdf4llm
 except ImportError as exc:  # pragma: no cover - runtime dependency
     raise SystemExit(
@@ -34,6 +36,51 @@ DEFAULT_MARKDOWN_ROOT = Path("backend/llm-wiki/raw/markdown")
 DEFAULT_OCR_LANGUAGE = "chi_sim+eng"
 # legacy 模式常把一张图拆成多个 pdf-{page}-{index} 小图块；同页 ≥4 张视为碎片化
 _FRAGMENTED_PAGE_IMAGE_THRESHOLD = 4
+# Windows MAX_PATH 为 260；layout 模式图片名含页码后缀，预留余量
+_WINDOWS_SAFE_PATH_LIMIT = 240
+_ZOTERO_KEY_RE = re.compile(r"^([A-Z0-9]{8})_")
+
+
+def _image_basename(stem: str) -> str:
+    """短文件名前缀，避免 Windows 路径过长；优先用 Zotero item key。"""
+    match = _ZOTERO_KEY_RE.match(stem)
+    if match:
+        return match.group(1)
+    if len(stem) <= 48:
+        return stem
+    return hashlib.sha256(stem.encode("utf-8")).hexdigest()[:12]
+
+
+def _worst_case_image_filename(basename: str) -> str:
+    return f"{basename}-9999-99.png"
+
+
+def _joined_path_length(parent: Path, *parts: str) -> int:
+    try:
+        path = parent.joinpath(*parts).resolve()
+    except OSError:
+        path = parent.joinpath(*parts)
+    return len(str(path))
+
+
+def _assets_dir_name(markdown_path: Path) -> str:
+    """返回 .assets 目录名；路径过长时改用短前缀。"""
+    stem = markdown_path.stem
+    parent = markdown_path.parent
+    long_assets = f"{stem}.assets"
+    if (
+        _joined_path_length(
+            parent, long_assets, _worst_case_image_filename(stem)
+        )
+        < _WINDOWS_SAFE_PATH_LIMIT
+    ):
+        return long_assets
+    short_base = _image_basename(stem)
+    return f"{short_base}.assets"
+
+
+def assets_dir_path(markdown_path: Path) -> Path:
+    return markdown_path.parent / _assets_dir_name(markdown_path)
 
 
 def _iter_pdf_files(pdf_root: Path) -> list[Path]:
@@ -119,6 +166,7 @@ def _run_pymupdf4llm_to_markdown(
     force_ocr: bool,
     ocr_language: str,
     markdown_parent: Path,
+    image_basename: str,
 ) -> str:
     """调用 pymupdf4llm；write_images 时走 layout 模式整图导出，否则 legacy 文本模式。"""
     to_md_kwargs: dict[str, object] = {
@@ -134,13 +182,15 @@ def _run_pymupdf4llm_to_markdown(
         to_md_kwargs["image_path"] = images_dir.name
         to_md_kwargs["force_text"] = False
         to_md_kwargs["dpi"] = 150
-        with _working_directory(markdown_parent):
-            return str(
-                pymupdf4llm.to_markdown(
-                    str(pdf_path),
-                    **to_md_kwargs,
-                )
-            )
+        to_md_kwargs["filename"] = image_basename
+        # 从内存打开 PDF，使 pymupdf4llm 使用短 filename 而非完整路径作图片前缀
+        pdf_bytes = pdf_path.read_bytes()
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            with _working_directory(markdown_parent):
+                return str(pymupdf4llm.to_markdown(doc, **to_md_kwargs))
+        finally:
+            doc.close()
     pymupdf4llm.use_layout(False)
     to_md_kwargs["image_path"] = ""
     return str(pymupdf4llm.to_markdown(str(pdf_path), **to_md_kwargs))
@@ -158,11 +208,8 @@ def _convert_one(
     pdf_path = pdf_path.expanduser().resolve()
     markdown_path = markdown_path.expanduser().resolve()
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
-    images_dir = (
-        markdown_path.parent / f"{markdown_path.stem}.assets"
-        if write_images
-        else None
-    )
+    image_basename = _image_basename(markdown_path.stem)
+    images_dir = assets_dir_path(markdown_path) if write_images else None
     part_path = markdown_path.with_suffix(".md.part")
     lock_path = _convert_lock_path(markdown_path)
 
@@ -190,6 +237,7 @@ def _convert_one(
             force_ocr=force_ocr,
             ocr_language=ocr_language,
             markdown_parent=markdown_path.parent,
+            image_basename=image_basename,
         )
         if markdown_text is None or not str(markdown_text).strip():
             raise RuntimeError(
@@ -234,7 +282,7 @@ def convert_one(
         raise ValueError(f"Input file must be a .pdf: {pdf_path}")
 
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
-    assets_dir = markdown_path.parent / f"{markdown_path.stem}.assets"
+    assets_dir = assets_dir_path(markdown_path)
     if markdown_path.exists() and not overwrite:
         needs_images = write_images and (
             not assets_dir.is_dir()
@@ -265,7 +313,7 @@ def convert_one(
         "use_ocr": use_ocr,
     }
     if write_images:
-        out["images_dir"] = str(markdown_path.parent / f"{markdown_path.stem}.assets")
+        out["images_dir"] = str(assets_dir_path(markdown_path))
     return out
 
 

@@ -1,4 +1,4 @@
-"""Zotero 流式对话：任务完成后用精简上下文生成用户可见的最终回复。"""
+"""Zotero 流式对话：整轮 agent 任务（含全部工具迭代）结束后，生成一次用户可见回复。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from loguru import logger
 from firefly.providers.base import LLMProvider
 from firefly.utils.helpers import strip_think
 from firefly.utils.prompt_templates import render_template
+from firefly.zotero_interface.utils import strip_zotero_user_content_for_session_storage
 
 _MAX_USER_QUERY_CHARS = 4_000
 _MAX_DRAFT_CHARS = 12_000
@@ -52,6 +53,67 @@ def build_summarizer_user_prompt(
         f"## Work log (tools)\n{tool_log}\n\n"
         f"## Agent draft (internal)\n{draft or '(no draft)'}"
     )
+
+
+def collect_zotero_turn_user_query(
+    initial_content: str,
+    all_messages: list[dict[str, Any]],
+    *,
+    had_injections: bool = False,
+) -> str:
+    """收集本轮用户问题；中途注入的 follow-up 会追加到同一任务上下文中。"""
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def _append(raw: str) -> None:
+        text = strip_zotero_user_content_for_session_storage(raw).strip() or raw.strip()
+        if text and text not in seen:
+            parts.append(text)
+            seen.add(text)
+
+    _append(initial_content)
+    if had_injections:
+        for msg in all_messages:
+            if msg.get("role") != "user":
+                continue
+            _append(str(msg.get("content") or ""))
+    return "\n\n".join(parts)
+
+
+async def finalize_zotero_stream_reply(
+    provider: LLMProvider,
+    model: str,
+    *,
+    user_query: str,
+    tool_events: list[dict[str, str]],
+    agent_draft: str,
+    on_answer_stream: Callable[[str], Awaitable[None]] | None = None,
+    on_stream_end: Callable[..., Awaitable[None]] | None = None,
+) -> str:
+    """Agent 任务（含全部工具轮次）结束后，生成一次用户可见回复。
+
+    - 使用了工具：调用无工具的 summarizer 总结整轮工作。
+    - 未使用工具：直接将 agent 最终回复流式输出，不再额外调用 LLM。
+    """
+    if on_stream_end is not None:
+        await on_stream_end(resuming=False)
+
+    draft = strip_think(agent_draft or "").strip()
+    if tool_events:
+        summarized = await summarize_zotero_reply(
+            provider,
+            model,
+            user_query=user_query,
+            tool_events=tool_events,
+            agent_draft=agent_draft,
+            on_stream=on_answer_stream,
+        )
+        return summarized.strip() or draft or "(无输出)"
+
+    text = draft or "(无输出)"
+    if on_answer_stream is not None and text:
+        await on_answer_stream(text)
+    return text
 
 
 async def summarize_zotero_reply(

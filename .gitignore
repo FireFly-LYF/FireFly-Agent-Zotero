@@ -27,7 +27,14 @@ backend/config/history/
 backend/config/*.local.json
 # Agent 生成物与本地下载（勿入库）
 backend/docx/
-backend/download/
+backend/download/*
+!backend/download/docx-mcp/
+!backend/download/docx-mcp/**
+# PDF→Markdown 转换中间/失败产物（raw/markdown 已整体忽略，此处供例外跟踪时兜底）
+*.md.part
+*.md.converting
+*.md.convert-error.txt
+*.assets/
 # 工作区运行时数据（模板文件 SOUL/USER/MEMORY 仍可由 workspace/.gitignore 白名单跟踪）
 backend/workspace/sessions/
 backend/workspace/temp/
