@@ -19,6 +19,35 @@ _WIKI_PAGE_CTX = re.compile(r"\[Wiki Page Context\][\s\S]*?\[/Wiki Page Context\
 _RAG_REMINDER = re.compile(r"\n----\n【RAG 再确认】[^\n]*(?:\n|$)")
 _QUERY_REMINDER = re.compile(r"\n----\n【请直接回答此问（优先于旧对话）】[\s\S]*\Z")
 
+ZOTERO_SPAWN_CONTEXT_KEY = "zotero_spawn_context"
+ZOTERO_USER_REQUEST_KEY = "zotero_user_request"
+
+
+def extract_zotero_spawn_context(text: str) -> str:
+    """从 Zotero 用户消息中提取子 agent 执行所需的运行时上下文（路径、提示、选段等）。"""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    parts: list[str] = []
+
+    item = _ITEM_HEAD.search(text)
+    if item:
+        parts.append(item.group(0).strip())
+
+    for pattern in (
+        _WIKI_PDF_LINE,
+        _WIKI_MD_LINE,
+        _LITERATURE_READ_HINT,
+        _MARKDOWN_MIRROR_MISSING,
+    ):
+        for match in pattern.finditer(text):
+            parts.append(match.group(0).strip())
+
+    for pattern in (_TEXT_CTX, _WIKI_PAGE_CTX):
+        for match in pattern.finditer(text):
+            parts.append(match.group(0).strip())
+
+    return "\n".join(parts).strip()
+
 
 def strip_zotero_user_content_for_session_storage(text: str) -> str:
     """Remove RAG blocks, path markers, and bridge trailers; keep the user's actual prompt."""

@@ -69,8 +69,8 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     messages = builder.build_messages(
         history=[],
         current_message="Return exactly: OK",
-        channel="cli",
-        chat_id="direct",
+        channel="zotero",
+        chat_id="chat-1",
     )
 
     assert messages[0]["role"] == "system"
@@ -82,8 +82,8 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     assert isinstance(user_content, str)
     assert ContextBuilder._RUNTIME_CONTEXT_TAG in user_content
     assert "Current Time:" in user_content
-    assert "Channel: cli" in user_content
-    assert "Chat ID: direct" in user_content
+    assert "Channel: zotero" in user_content
+    assert "Chat ID: chat-1" in user_content
     assert "Return exactly: OK" in user_content
 
 
@@ -149,60 +149,39 @@ def test_partial_dream_processing_shows_only_remainder(tmp_path) -> None:
 
 
 def test_execution_rules_in_system_prompt(tmp_path) -> None:
-    """New execution rules should appear in the system prompt."""
+    """Zotero orchestration rules should appear in the system prompt."""
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
     prompt = builder.build_system_prompt()
-    assert "Act, don't narrate" in prompt
-    assert "Read before you write" in prompt
-    assert "verify the result" in prompt
+    assert "plan_tasks" in prompt
+    assert "spawn" in prompt
+    assert "auto-waits" in prompt.lower() or "auto-wait" in prompt.lower()
 
 
-def test_channel_format_hint_telegram(tmp_path) -> None:
-    """Telegram channel should get messaging-app format hint."""
+def test_zotero_format_hint_in_system_prompt(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
-    prompt = builder.build_system_prompt(channel="telegram")
+    prompt = builder.build_system_prompt()
     assert "Format Hint" in prompt
-    assert "messaging app" in prompt
+    assert "research assistant interface" in prompt
+    assert "Mathematical Formula Guidelines" in prompt
 
 
-def test_channel_format_hint_whatsapp(tmp_path) -> None:
-    """WhatsApp should get plain-text format hint."""
-    workspace = _make_workspace(tmp_path)
-    builder = ContextBuilder(workspace)
-
-    prompt = builder.build_system_prompt(channel="whatsapp")
-    assert "Format Hint" in prompt
-    assert "plain text only" in prompt
-
-
-def test_channel_format_hint_absent_for_unknown(tmp_path) -> None:
-    """Unknown or None channel should not inject a format hint."""
-    workspace = _make_workspace(tmp_path)
-    builder = ContextBuilder(workspace)
-
-    prompt = builder.build_system_prompt(channel=None)
-    assert "Format Hint" not in prompt
-
-    prompt2 = builder.build_system_prompt(channel="feishu")
-    assert "Format Hint" not in prompt2
-
-
-def test_build_messages_passes_channel_to_system_prompt(tmp_path) -> None:
-    """build_messages should pass channel through to build_system_prompt."""
+def test_build_messages_passes_channel_to_runtime_context(tmp_path) -> None:
+    """build_messages should pass channel into runtime metadata on the user turn."""
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
     messages = builder.build_messages(
         history=[], current_message="hi",
-        channel="telegram", chat_id="123",
+        channel="zotero", chat_id="chat-2",
     )
-    system = messages[0]["content"]
-    assert "Format Hint" in system
-    assert "messaging app" in system
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, str)
+    assert "Channel: zotero" in user_content
+    assert "Chat ID: chat-2" in user_content
 
 
 def test_subagent_result_does_not_create_consecutive_assistant_messages(tmp_path) -> None:
@@ -212,8 +191,8 @@ def test_subagent_result_does_not_create_consecutive_assistant_messages(tmp_path
     messages = builder.build_messages(
         history=[{"role": "assistant", "content": "previous result"}],
         current_message="subagent result",
-        channel="cli",
-        chat_id="direct",
+        channel="zotero",
+        chat_id="chat-1",
         current_role="assistant",
     )
 

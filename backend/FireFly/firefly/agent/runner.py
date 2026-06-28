@@ -44,6 +44,12 @@ _MAX_INJECTION_CYCLES = 5
 _SNIP_SAFETY_BUFFER = 1024
 _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
+_ZOTERO_LITERATURE_TOOL_RESULT_CAPS: dict[str, int] = {
+    "read_file": 128_000,
+    "rag_search": 32_000,
+    "rag_index": 8_000,
+}
+_REPEAT_TOOL_LOOP_THRESHOLD = 3
 _COMPACTABLE_TOOLS = frozenset({
     "read_file", "exec", "grep", "glob",
     "web_search", "web_fetch", "list_dir",
@@ -80,6 +86,7 @@ class AgentRunSpec:
     injection_callback: Any | None = None
     on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None
     on_llm_request: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    auto_await_stage: Callable[[], Awaitable[str | None]] | None = None
 
 
 @dataclass(slots=True)
@@ -218,8 +225,15 @@ class AgentRunner:
                 # 追加边界。
                 messages_for_model = self._drop_orphan_tool_results(messages)
                 messages_for_model = self._backfill_missing_tool_results(messages_for_model)
-                messages_for_model = self._microcompact(messages_for_model)
-                messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
+                if not self._is_zotero_session(spec):
+                    messages_for_model = self._microcompact(messages_for_model)
+                    messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
+                else:
+                    from firefly.agent.context import ContextBuilder
+
+                    messages_for_model = ContextBuilder.prepare_messages_for_llm(
+                        messages_for_model, channel="zotero",
+                    )
                 messages_for_model = self._snip_history(spec, messages_for_model)
                 # 裁剪后可能生成新的孤儿消息，需清理。
                 messages_for_model = self._drop_orphan_tool_results(messages_for_model)
@@ -315,6 +329,20 @@ class AgentRunner:
                         "pending_tool_calls": [],
                     },
                 )
+                await self._maybe_auto_await_stage(
+                    spec,
+                    messages,
+                    response.tool_calls,
+                    tools_used,
+                )
+                loop_hint = self._repeated_tool_call_hint(messages)
+                if loop_hint:
+                    messages.append({"role": "user", "content": loop_hint})
+                    logger.warning(
+                        "Injected repeat-tool hint for {} after iteration {}",
+                        spec.session_key or "default",
+                        iteration,
+                    )
                 empty_content_retries = 0
                 length_recovery_count = 0
                 # 检查点 1：工具执行后、下次 LLM 调用前提取注入消息
@@ -846,6 +874,35 @@ class AgentRunner:
             return
         messages.append(build_assistant_message(_PERSISTED_MODEL_ERROR_PLACEHOLDER))
 
+    async def _maybe_auto_await_stage(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+        tool_calls: list[ToolCallRequest],
+        tools_used: list[str],
+    ) -> None:
+        """spawn 批次结束后自动等待子任务，无需 LLM 再调 await_stage。"""
+        if spec.auto_await_stage is None:
+            return
+        if not any(tc.name == "spawn" for tc in tool_calls):
+            return
+        if any(tc.name == "await_stage" for tc in tool_calls):
+            return
+        try:
+            stage_result = await spec.auto_await_stage()
+        except Exception as exc:
+            logger.exception("auto_await_stage failed")
+            stage_result = f"Error: auto-await stage failed: {exc}"
+        if not stage_result or not str(stage_result).strip():
+            return
+        from firefly.agent.context import ContextBuilder
+
+        messages.append({
+            "role": "user",
+            "content": ContextBuilder.format_stage_results_injection(str(stage_result)),
+        })
+        tools_used.append("await_stage(auto)")
+
     def _normalize_tool_result(
         self,
         spec: AgentRunSpec,
@@ -854,25 +911,70 @@ class AgentRunner:
         result: Any,
     ) -> Any:
         result = ensure_nonempty_tool_result(tool_name, result)
-        try:
-            content = maybe_persist_tool_result(
-                spec.workspace,
-                spec.session_key,
-                tool_call_id,
-                result,
-                max_chars=spec.max_tool_result_chars,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Tool result persist failed for {} in {}: {}; using raw result",
-                tool_call_id,
-                spec.session_key or "default",
-                exc,
-            )
+        if self._is_zotero_session(spec):
             content = result
+        else:
+            try:
+                content = maybe_persist_tool_result(
+                    spec.workspace,
+                    spec.session_key,
+                    tool_call_id,
+                    result,
+                    max_chars=spec.max_tool_result_chars,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Tool result persist failed for {} in {}: {}; using raw result",
+                    tool_call_id,
+                    spec.session_key or "default",
+                    exc,
+                )
+                content = result
         if isinstance(content, str) and len(content) > spec.max_tool_result_chars:
-            return truncate_text(content, spec.max_tool_result_chars)
+            cap = spec.max_tool_result_chars
+            if self._is_zotero_session(spec):
+                cap = max(cap, _ZOTERO_LITERATURE_TOOL_RESULT_CAPS.get(tool_name, cap))
+            if len(content) > cap:
+                return truncate_text(content, cap)
         return content
+
+    @staticmethod
+    def _is_zotero_session(spec: AgentRunSpec) -> bool:
+        return str(spec.session_key or "").startswith("zotero:")
+
+    @staticmethod
+    def _repeated_tool_call_hint(messages: list[dict[str, Any]]) -> str | None:
+        """Detect identical tool calls in a row and nudge the model off the loop."""
+        signatures: list[tuple[str, str]] = []
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls") or []
+            if not tool_calls:
+                break
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                name = str(fn.get("name") or "")
+                args = str(fn.get("arguments") or "")
+                signatures.append((name, args))
+            if len(signatures) >= _REPEAT_TOOL_LOOP_THRESHOLD:
+                break
+        if len(signatures) < _REPEAT_TOOL_LOOP_THRESHOLD:
+            return None
+        recent = signatures[:_REPEAT_TOOL_LOOP_THRESHOLD]
+        if len(set(recent)) != 1:
+            return None
+        name, _ = recent[0]
+        return (
+            "[Tool loop detected] "
+            f"`{name}` was called {_REPEAT_TOOL_LOOP_THRESHOLD} times with the same arguments. "
+            "Stop repeating that call. "
+            "For docx: after `create_from_markdown`, call `open_document` then "
+            "`get_headings` + `search_text` (same turn) — do not loop `save_document` "
+            "unless you opened the file and made edits."
+        )
 
     @staticmethod
     def _drop_orphan_tool_results(

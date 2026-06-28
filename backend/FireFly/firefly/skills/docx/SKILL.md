@@ -22,7 +22,16 @@ A .docx file is a ZIP archive of XML files. This server unpacks the archive, par
 
 **Do NOT use for:** PDFs, spreadsheets, or `.doc` (legacy binary format — convert to .docx first).
 
-**Creating new .docx in this project:** use `mcp_docx-mcp_create_from_markdown` when you have a `.md` file, or `create_document` then `insert_text` / `replace_text` and `save_document`. Never `write_file` to a `.docx` path.
+**Creating new .docx in this project:** use `mcp_docx-mcp_create_from_markdown` when you have markdown body text. Never `write_file` to a `.docx` path.
+
+### New file from markdown (subagent workflow)
+
+1. **`create_from_markdown(output_path=…, markdown=…)`** — writes the file. **Do not** call `save_document` afterward unless you `open_document` and edit.
+2. **`open_document(same output_path)`**
+3. **One turn, parallel read-only:** `get_document_info()` + `get_headings()` + multiple `search_text("anchor")` (one anchor per call).
+4. Report to main agent: path + anchors found / paragraph counts. **Stop** — do not loop `save_document`.
+
+`save_document` is for **revise** workflows after `open_document` + edits, not after a fresh `create_from_markdown`.
 
 **Sourcing from paper markdown:** before drafting, `grep` section headings in `raw/markdown/*.md` (e.g. experiments, methods) — do not guess `read_file` offset.
 
@@ -51,6 +60,8 @@ save_document(output_path="docx/实验步骤复现指南.docx")
 If the user only said “写入 docx 文件夹” on the first turn, reuse the path you created when they ask for fixes on later turns.
 
 ## Verify deliverable before replying (mandatory)
+
+When running as a **subagent**, do not narrate the task — call tools first. Your final report to the main agent: path + verification anchors only.
 
 User complaints in Zotero often look like: “步骤是空的”, “你没改这个文件”, “还是有很多空白”. **Never** claim success right after `create_from_markdown` / `save_document` without opening the output.
 

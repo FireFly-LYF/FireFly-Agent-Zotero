@@ -27,6 +27,7 @@ backend/config/history/
 backend/config/*.local.json
 # Agent 生成物与本地下载（勿入库）
 backend/docx/
+backend/*.docx
 backend/download/*
 !backend/download/docx-mcp/
 !backend/download/docx-mcp/**

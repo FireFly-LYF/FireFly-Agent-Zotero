@@ -31,10 +31,11 @@ python firefly/skills/zotero/scripts/zotero_literature_reader.py --query "attent
 
 - 先阅读 `fields`（标题、作者、年份、DOI 等）
 - 再结合 `notes` 与 `annotations`
-- 需要全文证据时：
-  1. 优先 `read_file` **`backend/llm-wiki/raw/markdown/…/*.md`**（或消息中的 `[zotero_current_wiki_markdown_path=…]`）
-  2. 长文先 **`grep`** 定位章节标题/关键词（`output_mode=content`），再按行号 `read_file` — **禁止凭 offset 猜章节**
-  3. 或用 `zotero_read_item --include-storage-text`（内部同样 markdown → pdf → storage）
-  4. 章节检索用 **`rag_search`**，不要用 `read_file` 直接读 `raw/pdf`
-- **不要**对已有 markdown 镜像的文献使用 `read_file` 读 PDF
+- 需要全文证据时，按下列**来源优先级**（消息中含 llm-wiki 镜像标记时）：
+  1. **总结 / 方法提取 / 多章节问答** → **`rag_search` 首选**（可 `ensure_index=true`）；用主题化 query（如「第3节 方法」「双向双滑窗」「STMF 公式」），**不要**用 grep 逐词扫全文
+  2. **章节 Q&A** → `rag_search`（缺索引则 `rag_index`），路径来自 `[zotero_current_wiki_markdown_path=…]` / `[zotero_current_wiki_pdf_path=…]`
+  3. **精读扩展** → 在 RAG 命中章节后，用 `read_file(path, offset=…, limit=…)` 补全公式与步骤；offset 来自 RAG 片段中的行号或单次精准 grep，**禁止**从 offset=1 顺序翻页找章节
+  4. **元数据 / 笔记 / 批注** → `zotero_read_item`（`include_storage_text=true`）
+  5. **PDF** → 仅当尚无 markdown 镜像
+- **`grep`**：仅当 RAG 已定位章节但缺精确行号/公式锚点时使用；**不适合**总结类、方法综述类任务
 - 在回复中优先给出结构化结论，再给关键证据片段

@@ -2410,3 +2410,28 @@ async def test_dispatch_republishes_leftover_queue_messages(tmp_path):
     contents = [m.content for m in msgs]
     assert "leftover-1" in contents
     assert "leftover-2" in contents
+
+
+def test_repeated_tool_call_hint_detects_save_loop() -> None:
+    from firefly.agent.runner import AgentRunner
+
+    tc = {
+        "id": "c1",
+        "type": "function",
+        "function": {
+            "name": "mcp_docx-mcp_save_document",
+            "arguments": "{\"output_path\":\"docx/out.docx\"}",
+        },
+    }
+    messages = [
+        {"role": "user", "content": "write docx"},
+        {"role": "assistant", "content": "", "tool_calls": [tc]},
+        {"role": "tool", "tool_call_id": "c1", "name": "mcp_docx-mcp_save_document", "content": "ok"},
+        {"role": "assistant", "content": "", "tool_calls": [tc]},
+        {"role": "tool", "tool_call_id": "c1", "name": "mcp_docx-mcp_save_document", "content": "ok"},
+        {"role": "assistant", "content": "", "tool_calls": [tc]},
+    ]
+    hint = AgentRunner._repeated_tool_call_hint(messages)
+    assert hint is not None
+    assert "Tool loop detected" in hint
+    assert "save_document" in hint or "open_document" in hint

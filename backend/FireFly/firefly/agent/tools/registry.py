@@ -4,6 +4,17 @@ from typing import Any
 
 from firefly.agent.tools.base import Tool
 
+_EXECUTOR_CATALOG_DESC_MAX = 240
+
+
+def _escape_xml(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
 
 class ToolRegistry:
     """
@@ -71,6 +82,25 @@ class ToolRegistry:
         mcp_tools.sort(key=self._schema_name)
         return builtins + mcp_tools
 
+    def build_executor_catalog(self, *, exclude: frozenset[str] | None = None) -> str:
+        """Build a compact name+description list for orchestrator spawn delegation."""
+        skip = exclude or frozenset()
+        lines: list[str] = ["<executor_tools>"]
+        for schema in self.get_definitions():
+            name = self._schema_name(schema)
+            if not name or name in skip:
+                continue
+            fn = schema.get("function")
+            desc = fn.get("description", "") if isinstance(fn, dict) else schema.get("description", "")
+            desc = " ".join(str(desc).split())
+            if len(desc) > _EXECUTOR_CATALOG_DESC_MAX:
+                desc = desc[: _EXECUTOR_CATALOG_DESC_MAX - 3] + "..."
+            lines.append(
+                f'  <tool name="{_escape_xml(name)}">{_escape_xml(desc)}</tool>'
+            )
+        lines.append("</executor_tools>")
+        return "\n".join(lines)
+
     def prepare_call(
         self,
         name: str,
@@ -113,6 +143,18 @@ class ToolRegistry:
             return result
         except Exception as e:
             return f"Error executing {name}: {str(e)}" + _HINT
+
+    def subset(self, names: list[str]) -> tuple["ToolRegistry", list[str]]:
+        """按名称复制子集；返回 (新注册表, 未找到的工具名)。"""
+        registry = ToolRegistry()
+        missing: list[str] = []
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is None:
+                missing.append(name)
+            else:
+                registry.register(tool)
+        return registry, missing
 
     @property
     def tool_names(self) -> list[str]:

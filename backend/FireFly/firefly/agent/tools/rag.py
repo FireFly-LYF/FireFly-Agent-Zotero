@@ -71,11 +71,11 @@ class RagSearchTool(Tool):
     name = "rag_search"
     description = (
         "Retrieve relevant passages from a local RAG index (.jsonl) for literature Q&A. "
-        "Prefer markdown_path (from [zotero_current_wiki_markdown_path=…]) over wiki_pdf_path. "
-        "Also accepts rag_path. "
-        "Call this when answering questions about the open paper's methods, experiments, "
-        "sections, or citations—not for casual chat. If the index is missing, call rag_index first "
-        "or set ensure_index=true when markdown is available."
+        "**Use this first** for summarize / method-extraction / multi-section tasks — "
+        "not grep. Prefer markdown_path (from [Zotero Runtime Context] or "
+        "[zotero_current_wiki_markdown_path=…]) over wiki_pdf_path. "
+        "Use topical queries per section (e.g. 'section 3 method', 'STMF formula'). "
+        "If the index is missing, call rag_index or set ensure_index=true."
     )
 
     @property

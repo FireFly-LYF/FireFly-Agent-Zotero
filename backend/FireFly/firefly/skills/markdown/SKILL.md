@@ -21,22 +21,31 @@ version: 1.0.0
 
 脚本仍可用于批量离线建库；对话内检索优先用上述工具。
 
+## RAG 问答规范
+
+- 以 `rag_search` 结果为**主要事实来源**；勿用通用知识替代检索未覆盖的细节。
+- **总结、方法提取、算法综述**：先 1–3 次有针对性的 `rag_search`（不同 query 覆盖各小节），再按需 `read_file` 扩展公式；**禁止**用多次 `grep` 扫全文代替 RAG。
+- 索引缺失时先 `rag_index`，或 `rag_search(ensure_index=true)`。
+- **勿向用户暴露检索 mechanics**：避免「从 chunk 1 可知」「according to fragment N」等表述；需要溯源时用章节/主题，不用 chunk 编号。
+
 ## 在长 markdown 中定位章节
 
-`raw/markdown/*.md` 的行号与论文章节号、PDF 页码**不对应**。不要用 `read_file` 的 `offset` 凭感觉跳读（例如 `offset=100` 并不等于第四章）。
+`raw/markdown/*.md` 的行号与论文章节号、PDF 页码**不对应**。
 
-推荐流程：
+### 总结 / 方法类任务（默认）
 
-1. **`grep`**：`path` 设为该 `.md`，`output_mode=content`，用标题或关键词（如 `仿真实验`、`## **4**`、`实验步骤`）。
-2. 根据 grep 输出的**行号**，再 `read_file(path, offset=行号, limit=…)` 精读该段。
-3. 若问题可由 RAG 覆盖，优先 **`rag_search`**，减少手工翻页。
+1. **`rag_search`**：`markdown_path` + 主题 query（如「联合干扰感知方法」「3.1 双向双滑窗」「ISRJ 重构公式」）；缺索引则 `ensure_index=true`。
+2. 若需完整公式链或步骤细节，根据 RAG 返回的章节/行号提示，**单次** `read_file(path, offset=…, limit=…)` 扩展。
+3. 仅当 RAG 明确指向某标题但缺行号时，才用 **`grep`**（`output_mode=content`，**单次**、**窄 pattern**）定位，然后 `read_file`。
+
+**禁止**：连续多轮 `grep`（「方法|算法|公式|提出|本文…」）试探；禁止从 `offset=1` 顺序 read 找章节。
+
+### 精确锚点（非总结类）
+
+若问题只是「某词出现在哪一行」：
 
 ```text
-# 错误：猜 offset
-read_file(path, offset=200, limit=500)
-
-# 正确：先定位再读
-grep(pattern="仿真实验", path=path, output_mode="content")
+grep(pattern="仿真实验", path=<md>, output_mode="content")
 read_file(path, offset=<grep 行号>, limit=400)
 ```
 

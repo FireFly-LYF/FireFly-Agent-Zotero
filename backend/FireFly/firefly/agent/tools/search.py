@@ -285,13 +285,12 @@ class GrepTool(_SearchTool):
     def description(self) -> str:
         return (
             "Search file contents with a regex pattern. "
-            "Default output_mode is files_with_matches (file paths only); "
-            "use content mode for matching lines with context (max 20 lines before/after; "
-            "larger values are clamped automatically). "
-            "For llm-wiki paper markdown, grep headings/keywords with output_mode=content "
-            "and path set to the .md file before read_file — line numbers are not chapter numbers. "
-            "PDF extracts and tool-result cache files are normalized for hyphenated line breaks. "
-            "Skips binary and files >2 MB. Supports glob/type filtering."
+            "NOT for literature summarize/method-extraction — use rag_search first. "
+            "Use grep only for a single pinpoint lookup (exact heading/anchor) after RAG, "
+            "with path set to the paper .md and output_mode=content. "
+            "Do not run repeated broad keyword greps (方法|算法|公式) across the whole paper. "
+            "Default output_mode is files_with_matches; content mode adds line context. "
+            "PDF extracts are normalized for hyphenated line breaks. Skips binary and files >2 MB."
         )
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
