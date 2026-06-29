@@ -8,6 +8,10 @@ from typing import Any
 
 from loguru import logger
 
+from firefly.skills.markdown.scripts.markdown_headings import (
+    extract_markdown_headings,
+    heading_line_for_section_path,
+)
 from firefly.skills.markdown.scripts.rag_utils import retrieve_rag_chunks_with_chapter_expansion
 
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -230,40 +234,95 @@ def search_rag_chunks(
     return retrieve_rag_chunks_with_chapter_expansion(query, rag_jsonl_path, top_k=top_k)
 
 
+def _resolve_markdown_for_rag_path(rag_path: Path) -> Path | None:
+    """Best-effort: rag jsonl -> sibling raw/markdown .md."""
+    md_root = resolve_markdown_root_from_rag_path(rag_path)
+    if md_root is None:
+        return None
+    parts = list(rag_path.parts)
+    lowered = [p.lower() for p in parts]
+    try:
+        idx = lowered.index("rag")
+        if idx > 0 and parts[idx - 1].lower() == "raw":
+            rel_parts = parts[idx + 1 :]
+            if rel_parts:
+                candidate = md_root.joinpath(*rel_parts).with_suffix(".md")
+                if candidate.is_file():
+                    return candidate
+    except ValueError:
+        pass
+    stem = rag_path.stem
+    try:
+        matches = list(md_root.rglob(f"{stem}.md"))
+        if len(matches) == 1:
+            return matches[0]
+    except OSError:
+        return None
+    return None
+
+
 def format_rag_chunks_for_agent(
     query: str,
     rag_path: Path,
     chunks: list[dict[str, Any]],
     *,
-    max_chunk_chars: int = 900,
+    max_chunk_chars: int = 3_500,
+    max_chunks_display: int = 20,
 ) -> str:
     if not chunks:
         return (
             f"No RAG chunks matched query={query!r} in {rag_path}. "
-            "Try rag_index if the jsonl is missing or stale, or broaden the query."
+            "Try a shorter keyword query, a section number (e.g. 4.2), or get_markdown_headings "
+            "then read_file(offset=…). If the index is missing, call rag_index or ensure_index=true."
         )
+
+    total = len(chunks)
+    display = chunks[:max_chunks_display] if max_chunks_display > 0 else chunks
+
+    heading_lines: list[dict[str, Any]] = []
+    md_path = _resolve_markdown_for_rag_path(rag_path)
+    if md_path is not None:
+        try:
+            heading_lines = extract_markdown_headings(
+                md_path.read_text(encoding="utf-8", errors="ignore")
+            )
+        except OSError:
+            heading_lines = []
+
     lines = [
         f"RAG search results (source: {rag_path})",
         f"query: {query}",
         (
-            f"Retrieved {len(chunks)} chunk(s). Chapter titles are prioritized; "
-            "matching a subsection may expand the parent chapter. Chunks are ordered by relevance "
-            "then document index."
-        ),
-        (
-            "Use these passages as the primary factual basis. If the user names a section "
-            "(e.g. 4.2), prefer chunks whose section=[…] matches. Formulas may contain OCR "
-            "errors—normalize to LaTeX ($...$ / $$...$$) before answering. Do not cite chunk "
-            "numbers in user-visible prose."
-        ),
-    ]
-    for i, rec in enumerate(chunks, start=1):
+            f"Retrieved {total} chunk(s), showing top {len(display)}. Chapter titles are prioritized; "
+        "matching a subsection may expand that section (not the whole paper). "
+        "Chunks are ordered by relevance then document index."
+    ),
+    (
+        "Use these passages as the primary factual basis. If the user names a section "
+        "(e.g. 4.2), prefer chunks whose section=[…] matches. When start_line is shown, "
+        "use read_file(path, offset=start_line, limit=…) **once** to expand formulas — do not "
+        "re-run rag_search with rephrased queries. Formulas may contain OCR errors—normalize to "
+        "LaTeX ($...$ / $$...$$) before answering. Do not cite chunk numbers in user-visible prose."
+    ),
+]
+    for i, rec in enumerate(display, start=1):
         txt = str(rec.get("text", "") or "").strip()
         txt = rewrite_chunk_image_refs_for_multimodal(txt, rec, rag_path)
         if len(txt) > max_chunk_chars:
             txt = txt[:max_chunk_chars] + " ..."
         section_path = str(rec.get("section_path", "") or "").strip()
         section_info = f" section=[{section_path}]" if section_path else ""
-        lines.append(f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}{section_info}) ---")
+        start_line = rec.get("start_line")
+        if start_line is None and section_path and heading_lines:
+            start_line = heading_line_for_section_path(section_path, heading_lines)
+        line_info = f" start_line={start_line}" if start_line else ""
+        lines.append(
+            f"--- chunk {i} (index={rec.get('chunk_index', i - 1)}{section_info}{line_info}) ---"
+        )
         lines.append(txt)
+    if total > len(display):
+        lines.append(
+            f"... ({total - len(display)} more chunk(s) omitted; use read_file from start_line= "
+            "on the best-matching chunk above instead of another rag_search.)"
+        )
     return "\n".join(lines)

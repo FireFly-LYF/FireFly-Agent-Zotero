@@ -14,8 +14,15 @@ if TYPE_CHECKING:
 @tool_parameters(
     tool_parameters_schema(
         stages=ArraySchema(
-            StringSchema("One stage of the todo plan (executed in order)"),
-            description="Ordered list of stages. Each stage may use one or more `spawn` calls.",
+            StringSchema(
+                "One stage = one deliverable using one tool/skill profile "
+                "(e.g. literature extract OR docx write — not per-tool micro-steps)"
+            ),
+            description=(
+                "Ordered stages. Split only when the next stage needs different "
+                "tools/skills (typically 1–2 stages for Zotero). Each stage gets "
+                "one focused spawn unless parallel same-profile work is needed."
+            ),
             min_items=1,
         ),
         required=["stages"],
@@ -38,9 +45,13 @@ class PlanTasksTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "REQUIRED first step for any multi-step task: "
-            "create an ordered stage list. Then `spawn` each stage with "
-            "`tools`, `skills`, and `context`; the runtime auto-waits and injects stage results."
+            "Start multi-stage orchestration: create a short stage list before spawning. "
+            "Use only when the job needs different tool/skill profiles (e.g. literature "
+            "extract then docx write). Simple Q&A or single-profile work: skip this and "
+            "use executor tools directly. "
+            "Split stages only when tools/skills change — NOT one stage per "
+            "get_headings/rag_search/read_file. Then spawn once per stage; runtime "
+            "auto-waits and injects results."
         )
 
     async def execute(self, stages: list[str], **kwargs: Any) -> str:

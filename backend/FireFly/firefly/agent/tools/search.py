@@ -286,7 +286,9 @@ class GrepTool(_SearchTool):
         return (
             "Search file contents with a regex pattern. "
             "NOT for literature summarize/method-extraction — use rag_search first. "
-            "Use grep only for a single pinpoint lookup (exact heading/anchor) after RAG, "
+            "For section outlines use get_markdown_headings once instead of grep sweeps. "
+            "Use grep only for a single pinpoint lookup (exact heading/anchor) when RAG and "
+            "get_markdown_headings lack the target, "
             "with path set to the paper .md and output_mode=content. "
             "Do not run repeated broad keyword greps (方法|算法|公式) across the whole paper. "
             "Default output_mode is files_with_matches; content mode adds line context. "

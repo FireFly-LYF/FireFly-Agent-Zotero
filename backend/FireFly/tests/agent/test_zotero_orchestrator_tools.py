@@ -1,4 +1,4 @@
-"""Tests: main agent exposes orchestration tools only."""
+"""Tests: Zotero main agent direct vs orchestration tool exposure."""
 
 from __future__ import annotations
 
@@ -7,7 +7,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from firefly.agent.context import ContextBuilder
-from firefly.agent.loop import ZOTERO_ORCHESTRATOR_TOOL_NAMES, AgentLoop
+from firefly.agent.loop import AgentLoop
+from firefly.agent.toolregistry import (
+    ZOTERO_ORCHESTRATOR_TOOL_NAMES,
+)
 from firefly.bus.queue import MessageBus
 
 
@@ -24,36 +27,46 @@ def _make_loop(workspace) -> AgentLoop:
     )
 
 
-def test_tools_for_llm_orchestrator_subset() -> None:
-    loop = _make_loop(Path("/tmp/firefly-zotero-test"))
-    all_names = set(loop.tools.tool_names)
-    assert len(all_names) > len(ZOTERO_ORCHESTRATOR_TOOL_NAMES)
+def test_tools_direct_mode_exposes_rag_and_plan_tasks_not_spawn() -> None:
+    loop = _make_loop(Path("/tmp/firefly-zotero-direct"))
+    exposed = loop._resolve_tools_for_llm("zotero", "zotero:chat-1")
+    names = set(exposed.tool_names)
+    assert "rag_search" in names
+    assert "read_file" in names
+    assert "plan_tasks" in names
+    assert "spawn" not in names
 
-    exposed = loop._tools_for_llm("zotero")
+
+def test_tools_orchestration_mode_subset() -> None:
+    loop = _make_loop(Path("/tmp/firefly-zotero-orch"))
+    loop.subagents.start_task_plan("zotero:chat-1", ["Extract", "Write docx"])
+    exposed = loop._resolve_tools_for_llm("zotero", "zotero:chat-1")
     assert set(exposed.tool_names) == set(ZOTERO_ORCHESTRATOR_TOOL_NAMES)
-    assert len(exposed.get_definitions()) == len(ZOTERO_ORCHESTRATOR_TOOL_NAMES)
-    assert "await_stage" not in exposed.tool_names
 
 
-def test_system_prompt_includes_delegation_catalog() -> None:
-    loop = _make_loop(Path("/tmp/firefly-zotero-prompt"))
-    prompt = loop.context.build_system_prompt()
-
-    assert "Delegation catalog" in prompt
-    assert "<skills>" in prompt
-    assert "<executor_tools>" in prompt
-    assert "rag_search" in prompt
-    catalog_tools = prompt.split("<executor_tools>", 1)[1].split("</executor_tools>", 1)[0]
-    assert "plan_tasks" not in catalog_tools
-    assert "spawn" not in catalog_tools
-
-
-def test_system_prompt_uses_zotero_orchestration() -> None:
+def test_system_prompt_direct_includes_active_skills() -> None:
     builder = ContextBuilder(Path("/tmp/firefly-zotero-prompt"))
-
-    prompt = builder.build_system_prompt()
-
-    assert "Active Skills" not in prompt
+    prompt = builder.build_system_prompt(orchestration_mode=False)
+    assert "Active Skills" in prompt
+    assert "you choose the mode" in prompt.lower()
     assert "plan_tasks" in prompt
-    assert "spawn" in prompt
-    assert "auto-waits" in prompt.lower() or "auto-wait" in prompt.lower()
+
+
+def test_system_prompt_orchestration_includes_delegation_catalog() -> None:
+    loop = _make_loop(Path("/tmp/firefly-zotero-prompt-orch"))
+    prompt = loop.context.build_system_prompt(orchestration_mode=True)
+    assert "Delegation catalog" in prompt
+    assert "Zotero orchestration (active" in prompt
+    assert "Active Skills" not in prompt
+
+
+def test_reset_orchestrator_clears_plan() -> None:
+    loop = _make_loop(Path("/tmp/firefly-zotero-reset"))
+    key = "zotero:chat-1"
+    loop.subagents.start_task_plan(key, ["Stage A"])
+    assert loop._is_orchestration_active(key)
+    loop.subagents.reset_orchestrator(key)
+    assert not loop._is_orchestration_active(key)
+    exposed = loop._resolve_tools_for_llm("zotero", key)
+    assert "spawn" not in exposed.tool_names
+    assert "plan_tasks" in exposed.tool_names

@@ -14,6 +14,7 @@ from firefly.utils.helpers import build_image_content_blocks, detect_image_mime,
 from firefly.agent.temp import register_agent_temp_file, validate_scratch_write_path
 from firefly.config.paths import get_media_dir
 from firefly.skills.markdown.scripts.rag_paths import llm_wiki_markdown_mirror_for_pdf
+from firefly.utils.docx_paths import is_docx_delivery_path, resolve_docx_path
 
 
 def _resolve_path(
@@ -23,10 +24,13 @@ def _resolve_path(
     extra_allowed_dirs: list[Path] | None = None,
 ) -> Path:
     """将路径解析到工作区（若为相对路径）并执行目录访问限制。"""
-    p = Path(path).expanduser()
-    if not p.is_absolute() and workspace:
-        p = workspace / p
-    resolved = p.resolve()
+    if is_docx_delivery_path(path):
+        resolved = resolve_docx_path(path)
+    else:
+        p = Path(path).expanduser()
+        if not p.is_absolute() and workspace:
+            p = workspace / p
+        resolved = p.resolve()
     if allowed_dir:
         media_path = get_media_dir().resolve()
         all_dirs = [allowed_dir] + [media_path] + (extra_allowed_dirs or []) 
@@ -412,7 +416,7 @@ class WriteFileTool(_FsTool):
                     f"Error: Cannot write Word binary format with write_file ({fp.name}). "
                     "Use docx-mcp instead: mcp_docx-mcp_create_from_markdown (from .md), "
                     "mcp_docx-mcp_create_document, then mcp_docx-mcp_insert_text / replace_text "
-                    "and mcp_docx-mcp_save_document. After writing, open_document + get_headings/search_text "
+                    "and mcp_docx-mcp_save_document. After writing, open_document + get_body_text/get_headings "
                     "to verify content before telling the user the task is done. "
                     "Plain text or Markdown is not a valid .docx."
                 )

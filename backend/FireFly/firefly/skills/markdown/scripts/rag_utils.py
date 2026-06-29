@@ -138,6 +138,56 @@ def _token_matches_chapter_num(tok: str, chapter_num: str) -> bool:
     return False
 
 
+def deepest_numeric_tuple_in_section_path(section_path: str) -> tuple[int, ...] | None:
+    """section_path 中最深（最具体）的数字章节号，如 4 > 4.2 -> (4, 2)。"""
+    best: tuple[int, ...] | None = None
+    for seg in [s.strip() for s in str(section_path or "").split(">") if s.strip()]:
+        st = segment_leading_numeric_tuple(seg)
+        if st is None:
+            continue
+        if best is None or len(st) > len(best):
+            best = st
+    return best
+
+
+def section_is_under_numeric_prefix(section_path: str, prefix: tuple[int, ...]) -> bool:
+    """True when the deepest numeric heading in path is prefix or a child of prefix."""
+    dt = deepest_numeric_tuple_in_section_path(section_path)
+    if dt is None or not prefix:
+        return False
+    return len(dt) >= len(prefix) and dt[: len(prefix)] == prefix
+
+
+def section_matches_numeric_prefix(section_path: str, prefix: tuple[int, ...]) -> bool:
+    """判断 section_path 是否落在 prefix 对应的小节及其子节（或父节）内。"""
+    if not prefix:
+        return False
+    for seg in [s.strip() for s in str(section_path or "").split(">") if s.strip()]:
+        st = segment_leading_numeric_tuple(seg)
+        if st is None:
+            continue
+        if len(st) >= len(prefix) and st[: len(prefix)] == prefix:
+            return True
+        if len(st) < len(prefix) and prefix[: len(st)] == st:
+            return True
+    return False
+
+
+def _token_matches_text(tok: str, text_lower: str) -> bool:
+    """正文匹配：英文整词 + 中文长串的 2-gram 重叠，减少「换说法就零召回」。"""
+    if not tok or not text_lower:
+        return False
+    if tok in text_lower:
+        return True
+    if len(tok) >= 4 and any("\u4e00" <= c <= "\u9fff" for c in tok):
+        bigrams = [tok[i : i + 2] for i in range(len(tok) - 1)]
+        if not bigrams:
+            return False
+        hits = sum(1 for bg in bigrams if bg in text_lower)
+        return hits >= max(2, (len(bigrams) + 1) // 2)
+    return False
+
+
 def tokenize_rag_query(text: str) -> list[str]:
     """
     中英文混合粗分词。
@@ -248,9 +298,10 @@ def retrieve_rag_chunks_with_chapter_expansion(
     query: str,
     rag_jsonl_path: Path,
     *,
-    top_k: int = 20,
-    min_hits_same_chapter: int = 1,
-    max_chunks_per_expanded_chapter: int = 120,
+    top_k: int = 16,
+    min_hits_same_chapter: int = 2,
+    max_chunks_per_expanded_chapter: int = 48,
+    max_return_chunks: int = 24,
 ) -> list[dict[str, Any]]:
     """
     章节感知的 RAG 召回策略。
@@ -264,9 +315,10 @@ def retrieve_rag_chunks_with_chapter_expansion(
     Args:
         query: 用户查询
         rag_jsonl_path: RAG JSONL 文件路径
-        top_k: 初始召回的 top-k chunks（默认20，增加以提高召回率）
-        min_hits_same_chapter: 同一章节最少命中次数才扩展（默认1，降低以更容易触发扩展）
-        max_chunks_per_expanded_chapter: 每章最多召回的 chunks 数量
+        top_k: 初始召回的 top-k chunks
+        min_hits_same_chapter: 同一小节前缀至少命中次数才扩展（默认 2，避免单次误命中整章灌满）
+        max_chunks_per_expanded_chapter: 每个扩展前缀最多并入的 chunks
+        max_return_chunks: 最终返回上限（按相关性排序后截断）
         
     Returns:
         召回的 chunk 记录列表，按 chunk_index 排序
@@ -347,7 +399,7 @@ def retrieve_rag_chunks_with_chapter_expansion(
     for rec in records:
         text = str(rec.get("text", "") or "")
         lowered = text.lower()
-        score = sum(1 for tok in tokens if tok in lowered)
+        score = sum(1 for tok in tokens if _token_matches_text(tok, lowered))
         if score > 0:
             content_scored.append((score, rec))
 
@@ -369,51 +421,69 @@ def retrieve_rag_chunks_with_chapter_expansion(
             if len(hits) >= top_k:
                 break
 
-    # 两阶段均无命中时：整句中文 token 往往无法在正文整段出现，避免零召回
-    if not hits and records:
-        def _rec_idx(r: dict[str, Any]) -> int:
-            try:
-                return int(r.get("chunk_index", -1))
-            except (TypeError, ValueError):
-                return -1
-
-        ordered = sorted((r for r in records if _rec_idx(r) >= 0), key=_rec_idx)
-        hits = ordered[:top_k]
-
     # ========== 第三阶段：章节层级扩展 ==========
-    # 提取所有命中的章节路径，并找出需要扩展的父章节
-    expand_section_prefixes: set[str] = set()
-    
+    # 优先按「具体小节号」（如 4.2）扩展，而非整章根号 4
+    candidate_numeric_prefixes: list[tuple[int, ...]] = []
+    for qn in query_nums:
+        candidate_numeric_prefixes.append(qn)
+    for rec in hits:
+        sp = str(rec.get("section_path", "") or "")
+        dt = deepest_numeric_tuple_in_section_path(sp)
+        if dt:
+            candidate_numeric_prefixes.append(dt)
+
+    seen_numeric: set[tuple[int, ...]] = set()
+    unique_numeric_prefixes: list[tuple[int, ...]] = []
+    for prefix in candidate_numeric_prefixes:
+        if prefix not in seen_numeric:
+            seen_numeric.add(prefix)
+            unique_numeric_prefixes.append(prefix)
+        for i in range(len(prefix) - 1, 0, -1):
+            anc = prefix[:i]
+            if anc not in seen_numeric:
+                seen_numeric.add(anc)
+                unique_numeric_prefixes.append(anc)
+
+    numeric_prefix_hit_count: dict[tuple[int, ...], int] = {}
+    for rec in hits:
+        sp = str(rec.get("section_path", "") or "")
+        dt = deepest_numeric_tuple_in_section_path(sp)
+        prefixes_for_hit: set[tuple[int, ...]] = set()
+        if dt:
+            for i in range(len(dt), 0, -1):
+                prefixes_for_hit.add(dt[:i])
+        for prefix in prefixes_for_hit:
+            if section_matches_numeric_prefix(sp, prefix):
+                numeric_prefix_hit_count[prefix] = numeric_prefix_hit_count.get(prefix, 0) + 1
+
+    expand_numeric_prefixes: set[tuple[int, ...]] = set()
+    max_query_depth = max((len(q) for q in query_nums), default=0)
+    for prefix in unique_numeric_prefixes:
+        if query_nums and len(prefix) < max_query_depth:
+            continue
+        required = 1 if prefix in query_nums else min_hits_same_chapter
+        if numeric_prefix_hit_count.get(prefix, 0) >= required:
+            expand_numeric_prefixes.add(prefix)
+
+    # 纯文本章节（无数字编号）仍按第一级标题扩展
+    expand_text_prefixes: set[str] = set()
     for rec in hits:
         section_path = str(rec.get("section_path", "") or "")
-        if not section_path:
-            continue
-        
-        # 解析章节路径（如 "4 > 4.3 > 4.3.1"）
         segments = [seg.strip() for seg in section_path.split(">") if seg.strip()]
-        
-        # 对于数字章节，提取根章节号（如 "4.3.1" -> "4"）
-        for seg in segments:
-            root = rag_numeric_chapter_root(seg)
-            if root:
-                expand_section_prefixes.add(root)
-                break  # 只取最外层数字章节
-        
-        # 路径里已有编号小节时，不把第一级当作「文本章」（避免 D > 4.1 把 D 当成整篇扩展前缀）
         has_numeric_segment = any(segment_leading_numeric_tuple(s) for s in segments)
         if segments and not has_numeric_segment and not rag_numeric_chapter_root(segments[0]):
-            expand_section_prefixes.add(segments[0])
+            expand_text_prefixes.add(segments[0])
 
-    # 统计每个章节前缀的命中次数
-    prefix_hit_count: dict[str, int] = {}
+    text_prefix_hit_count: dict[str, int] = {}
     for rec in hits:
         section_path = str(rec.get("section_path", "") or "")
-        for prefix in expand_section_prefixes:
+        for prefix in expand_text_prefixes:
             if section_belongs_to_chapter(section_path, prefix):
-                prefix_hit_count[prefix] = prefix_hit_count.get(prefix, 0) + 1
+                text_prefix_hit_count[prefix] = text_prefix_hit_count.get(prefix, 0) + 1
 
-    # 确定需要扩展的章节（命中次数 >= min_hits）
-    expand_chapters = {p for p, c in prefix_hit_count.items() if c >= min_hits_same_chapter}
+    expand_text_chapters = {
+        p for p, c in text_prefix_hit_count.items() if c >= min_hits_same_chapter
+    }
 
     # ========== 第四阶段：收集最终结果 ==========
     by_index: dict[int, dict[str, Any]] = {}
@@ -436,8 +506,21 @@ def retrieve_rag_chunks_with_chapter_expansion(
         if hi >= 0:
             include_idx.add(hi)
 
-    # 扩展章节：加入整章的所有 chunks
-    for chapter_prefix in expand_chapters:
+    # 扩展：并入同一数字小节前缀下的 chunks（如 4.2 及其子节，而非整章 4）
+    for numeric_prefix in expand_numeric_prefixes:
+        chapter_recs = [
+            r for r in records
+            if section_matches_numeric_prefix(str(r.get("section_path", "") or ""), numeric_prefix)
+        ]
+        for r in chapter_recs[:max_chunks_per_expanded_chapter]:
+            try:
+                idx = int(r.get("chunk_index", -1))
+            except (TypeError, ValueError):
+                continue
+            if idx >= 0:
+                include_idx.add(idx)
+
+    for chapter_prefix in expand_text_chapters:
         chapter_recs = [
             r for r in records
             if section_belongs_to_chapter(str(r.get("section_path", "") or ""), chapter_prefix)
@@ -496,7 +579,7 @@ def retrieve_rag_chunks_with_chapter_expansion(
                     token_best = weighted_score
         section_score += token_best
         
-        content_score = sum(1 for tok in tokens if tok in text.lower())
+        content_score = sum(1 for tok in tokens if _token_matches_text(tok, text.lower()))
         
         # 获取 chunk_index（用于相同分数时保持文档顺序）
         try:
@@ -509,5 +592,17 @@ def retrieve_rag_chunks_with_chapter_expansion(
     
     # 按相关性排序
     result_chunks.sort(key=_calculate_relevance_score)
-    
+
+    if query_nums:
+        target_prefix = max(query_nums, key=len)
+        scoped = [
+            r for r in result_chunks
+            if section_is_under_numeric_prefix(str(r.get("section_path") or ""), target_prefix)
+        ]
+        if scoped:
+            result_chunks = scoped
+
+    if max_return_chunks > 0 and len(result_chunks) > max_return_chunks:
+        result_chunks = result_chunks[:max_return_chunks]
+
     return result_chunks

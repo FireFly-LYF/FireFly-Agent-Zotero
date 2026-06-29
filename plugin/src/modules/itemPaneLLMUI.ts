@@ -1505,18 +1505,11 @@ export function registerLLMItemPaneSection() {
         if (!text) {
           return "";
         }
-        const paragraphs = text
-          .split(/\n{2,}/)
-          .map((p) => p.trim())
-          .filter((p) => !!p);
-        return paragraphs
-          .map((p) => {
-            const normalized = p.replace(/\n+/g, "\n");
-            if (normalized.startsWith("　　")) {
-              return normalized;
-            }
-            return `　　${normalized}`;
-          })
+        // Plain thinking text: do not inject paragraph-level fullwidth indent (breaks numbered lists).
+        // Strip leading fullwidth spaces per line so model/UI indent stays consistent.
+        return text
+          .split("\n")
+          .map((ln) => ln.replace(/^\u3000+/, "").trimEnd())
           .join("\n");
       }
 

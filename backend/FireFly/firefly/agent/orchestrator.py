@@ -179,9 +179,10 @@ class TaskOrchestrator:
             f"Task plan created ({len(self.stages)} stage(s)).",
             "",
             "Workflow:",
-            "1. For the active stage, dispatch work with `spawn` (task profiles encouraged).",
-            "2. When spawn batch finishes, the runtime auto-waits for subagents and injects stage results.",
-            "3. Repeat until all stages complete.",
+            "1. One stage = one tool/skill profile (literature OR docx, etc.) — not one stage per tool.",
+            "2. `spawn` once per stage with outcome-focused task + tools/skills/context.",
+            "3. When spawn batch finishes, runtime auto-waits and injects stage results.",
+            "4. Repeat until all stages complete.",
             "",
             self.format_context_block() or "",
         ]

@@ -247,6 +247,26 @@ def test_get_history_min_message_index_respects_last_consolidated():
     assert [m["content"] for m in h if m["role"] == "user"] == ["keep"]
 
 
+def test_get_history_returns_empty_when_no_user_anchor() -> None:
+    """Crashed turns may leave assistant+tool without a user message."""
+    session = Session(key="zotero:orphan")
+    session.messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "thinking",
+                "tool_calls": [
+                    {"id": "t1", "type": "function", "function": {"name": "rag_search", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "t1", "name": "rag_search", "content": "hits"},
+        ]
+    )
+
+    assert session.get_history(max_messages=500) == []
+
+
 def test_delete_turn_containing_assistant_removes_tool_chain() -> None:
     session = Session(key="test:del-turn-tools")
     session.messages.extend(

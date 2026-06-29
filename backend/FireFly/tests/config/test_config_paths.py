@@ -5,6 +5,7 @@ from firefly.config.paths import (
     get_cli_history_path,
     get_cron_dir,
     get_data_dir,
+    get_docx_dir,
     get_legacy_sessions_dir,
     get_logs_dir,
     get_media_dir,
@@ -53,6 +54,21 @@ def test_workspace_path_is_explicitly_resolved(monkeypatch, tmp_path: Path) -> N
 
     assert get_workspace_path() == iso / "workspace"
     assert get_workspace_path("~/custom-workspace") == Path.home() / "custom-workspace"
+
+
+def test_docx_dir_under_llm_wiki(monkeypatch, tmp_path: Path) -> None:
+    backend = tmp_path / "backend"
+    wiki = backend / "llm-wiki" / "wiki"
+    wiki.mkdir(parents=True)
+    config_file = backend / "config" / "config.json"
+    ws = backend / "workspace"
+    ws.mkdir()
+    monkeypatch.setattr("firefly.config.paths.get_config_path", lambda: config_file)
+    monkeypatch.setattr("firefly.config.paths.resolve_default_base_dir", lambda: backend)
+    monkeypatch.setattr("firefly.config.paths.get_workspace_path", lambda _w=None: ws)
+
+    assert get_docx_dir() == (backend / "llm-wiki" / "docx").resolve()
+    assert get_docx_dir().is_dir()
 
 
 def test_is_default_workspace_distinguishes_default_and_custom_paths(

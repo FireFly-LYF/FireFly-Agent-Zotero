@@ -18,6 +18,7 @@ version: 1.0.0
 
 - **`rag_search`**：`query` + `wiki_pdf_path`（来自 `[zotero_current_wiki_pdf_path=…]`）/ `rag_path` / `markdown_path`；可选 `ensure_index=true` 在缺索引时先切片
 - **`rag_index`**：从 `markdown_path` 或 `wiki_pdf_path` 构建/刷新 `raw/rag/*.jsonl`
+- **`get_markdown_headings`**：一次返回全文标题树与 **行号**（替代多次 grep 定位章节）
 
 脚本仍可用于批量离线建库；对话内检索优先用上述工具。
 
@@ -35,8 +36,8 @@ version: 1.0.0
 ### 总结 / 方法类任务（默认）
 
 1. **`rag_search`**：`markdown_path` + 主题 query（如「联合干扰感知方法」「3.1 双向双滑窗」「ISRJ 重构公式」）；缺索引则 `ensure_index=true`。
-2. 若需完整公式链或步骤细节，根据 RAG 返回的章节/行号提示，**单次** `read_file(path, offset=…, limit=…)` 扩展。
-3. 仅当 RAG 明确指向某标题但缺行号时，才用 **`grep`**（`output_mode=content`，**单次**、**窄 pattern**）定位，然后 `read_file`。
+2. 若需完整公式链或步骤细节，根据 RAG 返回的 **`start_line=`** 或章节提示，**单次** `read_file(path, offset=…, limit=…)` 扩展。
+3. 若 RAG 无行号且需全文结构，调用 **`get_markdown_headings(path)` 一次**，再用返回的 `line` 做 `read_file` — **禁止**连续多轮 `grep`。
 
 **禁止**：连续多轮 `grep`（「方法|算法|公式|提出|本文…」）试探；禁止从 `offset=1` 顺序 read 找章节。
 

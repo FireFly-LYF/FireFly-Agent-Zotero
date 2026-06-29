@@ -222,9 +222,40 @@ class OpenAICompatProvider(LLMProvider):
             return tool_call_id
         return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
 
+    @staticmethod
+    def _strip_reasoning_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove reasoning fields that some providers reject on input (e.g. Zhipu GLM)."""
+        stripped: list[dict[str, Any]] = []
+        for msg in messages:
+            clean = dict(msg)
+            clean.pop("reasoning_content", None)
+            clean.pop("extra_content", None)
+            if isinstance(clean.get("tool_calls"), list):
+                clean["tool_calls"] = [
+                    {k: v for k, v in tc.items() if k != "extra_content"}
+                    if isinstance(tc, dict) else tc
+                    for tc in clean["tool_calls"]
+                ]
+            stripped.append(clean)
+        return stripped
+
+    @staticmethod
+    def _is_messages_format_error(e: Exception) -> bool:
+        body = (
+            getattr(e, "body", None)
+            or getattr(e, "doc", None)
+            or getattr(getattr(e, "response", None), "text", None)
+        )
+        text = f"{body} {e}".lower()
+        return (
+            "1214" in text
+            or ("messages" in text and ("非法" in text or "invalid" in text))
+        )
+
     def _sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip non-standard keys, normalize tool_call IDs."""
         sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWED_MSG_KEYS)
+        # Zhipu agent/tool chains require historical reasoning_content on input; only strip on 1214 retry.
         id_map: dict[str, str] = {}
 
         def map_id(value: Any) -> Any:
@@ -333,6 +364,14 @@ class OpenAICompatProvider(LLMProvider):
                 }
             if extra:
                 kwargs.setdefault("extra_body", {}).update(extra)
+
+        # Zhipu standard API disables thinking by default; enable for GLM hybrid-reasoning models.
+        if spec and spec.name == "zhipu":
+            model_lower = model_name.lower()
+            if any(token in model_lower for token in ("glm-4", "glm-5", "glm4", "glm5")):
+                kwargs.setdefault("extra_body", {}).update(
+                    {"thinking": {"type": "enabled", "clear_thinking": False}},
+                )
 
         if tools:
             kwargs["tools"] = tools
@@ -903,10 +942,14 @@ class OpenAICompatProvider(LLMProvider):
             try:
                 return self._parse(await self._client.chat.completions.create(**kwargs))
             except Exception as request_error:
-                if not self._is_reasoning_param_error(request_error):
-                    raise
-                fallback_kwargs = self._strip_reasoning_kwargs(kwargs)
-                return self._parse(await self._client.chat.completions.create(**fallback_kwargs))
+                if self._is_reasoning_param_error(request_error):
+                    fallback_kwargs = self._strip_reasoning_kwargs(kwargs)
+                    return self._parse(await self._client.chat.completions.create(**fallback_kwargs))
+                if self._spec and self._spec.name == "zhipu" and self._is_messages_format_error(request_error):
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs["messages"] = self._strip_reasoning_from_messages(kwargs["messages"])
+                    return self._parse(await self._client.chat.completions.create(**retry_kwargs))
+                raise
         except Exception as e:
             return self._handle_error(e, spec=self._spec, api_base=self.api_base)
 

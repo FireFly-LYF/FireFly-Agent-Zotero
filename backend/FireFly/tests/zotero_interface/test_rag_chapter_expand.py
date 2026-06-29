@@ -62,7 +62,7 @@ def test_extract_numeric_prefix_includes_single_section_number():
 
 
 def test_fallback_when_no_token_overlap(tmp_path):
-    """整句与正文无公共子串时仍返回篇首若干块，避免零召回。"""
+    """无 token 重叠时不应返回无关的篇首块（避免 agent 误判后反复换 query 重搜）。"""
     recs = [
         {"chunk_index": 0, "section_path": "D > A", "text": "alpha"},
         {"chunk_index": 1, "section_path": "D > B", "text": "beta"},
@@ -74,8 +74,39 @@ def test_fallback_when_no_token_overlap(tmp_path):
         p,
         top_k=2,
     )
-    assert len(out) == 2
-    assert [r["chunk_index"] for r in out] == [0, 1]
+    assert out == []
+
+
+def test_chinese_bigram_partial_match(tmp_path):
+    recs = [
+        {
+            "chunk_index": 0,
+            "section_path": "Doc > 方法",
+            "text": "本文提出双向双滑窗联合干扰感知算法用于雷达对抗",
+        },
+    ]
+    p = tmp_path / "rag.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in recs), encoding="utf-8")
+    out = retrieve_rag_chunks_with_chapter_expansion(
+        "双向双滑窗干扰感知方法",
+        p,
+        top_k=3,
+    )
+    assert out and out[0]["chunk_index"] == 0
+
+
+def test_query_section_expands_with_single_hit(tmp_path):
+    recs = [
+        {"chunk_index": 0, "section_path": "Doc > **4** 实验 > **4.1** A", "text": "other"},
+        {"chunk_index": 1, "section_path": "Doc > **4** 实验 > **4.2** 验证", "text": "target body unique_42"},
+        {"chunk_index": 2, "section_path": "Doc > **4** 实验 > **4.2.1** 细节", "text": "child detail"},
+    ]
+    p = tmp_path / "rag.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in recs), encoding="utf-8")
+    out = retrieve_rag_chunks_with_chapter_expansion("请总结4.2节验证", p, top_k=5)
+    idxs = {r["chunk_index"] for r in out}
+    assert 1 in idxs and 2 in idxs
+    assert 0 not in idxs
 
 
 def test_query_4_2_bold_path_ranks_target_section(tmp_path):

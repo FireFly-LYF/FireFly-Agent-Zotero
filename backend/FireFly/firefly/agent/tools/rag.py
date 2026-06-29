@@ -1,13 +1,15 @@
-"""Local literature RAG tools (search + index)."""
+"""Local literature RAG tools (search + index + markdown structure)."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 from firefly.agent.tools.base import Tool, tool_parameters
 from firefly.agent.tools.schema import BooleanSchema, IntegerSchema, StringSchema, tool_parameters_schema
+from firefly.skills.markdown.scripts.markdown_headings import extract_markdown_headings
 from firefly.skills.markdown.scripts.rag_paths import (
     ensure_markdown_rag_index,
     format_rag_chunks_for_agent,
@@ -56,11 +58,12 @@ def _resolve_markdown_source(
                 "(often from [zotero_current_wiki_markdown_path=…]); resolves sibling raw/rag/*.jsonl"
             ),
         ),
-        top_k=IntegerSchema(12, description="Max chunks to retrieve (1-30)", minimum=1, maximum=30),
+        top_k=IntegerSchema(16, description="Max chunks to retrieve (1-30)", minimum=1, maximum=30),
         ensure_index=BooleanSchema(
             description=(
                 "If true and RAG jsonl is missing but markdown exists, build the index before searching"
             ),
+            default=True,
         ),
         required=["query"],
     )
@@ -75,7 +78,8 @@ class RagSearchTool(Tool):
         "not grep. Prefer markdown_path (from [Zotero Runtime Context] or "
         "[zotero_current_wiki_markdown_path=…]) over wiki_pdf_path. "
         "Use topical queries per section (e.g. 'section 3 method', 'STMF formula'). "
-        "If the index is missing, call rag_index or set ensure_index=true."
+        "After one or two searches, expand with read_file(offset=start_line) — avoid rephrasing "
+        "the same rag_search. ensure_index defaults to true when the jsonl is missing."
     )
 
     @property
@@ -108,7 +112,8 @@ class RagSearchTool(Tool):
             markdown_path=markdown_path,
         )
         if resolved is None or not resolved.is_file():
-            if ensure_index:
+            build_index = True if ensure_index is None else bool(ensure_index)
+            if build_index:
                 md = _resolve_markdown_source(
                     markdown_path=markdown_path,
                     wiki_pdf_path=wiki_pdf_path,
@@ -136,7 +141,7 @@ class RagSearchTool(Tool):
                     "Call rag_index or rag_search with ensure_index=true after markdown exists."
                 )
 
-        k = max(1, min(30, int(top_k or 12)))
+        k = max(1, min(30, int(top_k or 16)))
         chunks = await asyncio.to_thread(search_rag_chunks, q, resolved, top_k=k)
         return format_rag_chunks_for_agent(q, resolved, chunks)
 
@@ -193,3 +198,53 @@ class RagIndexTool(Tool):
             f"chunk_count: {meta['rag_chunk_count']}\n"
             f"had_prior_index: {meta['had_prior_rag_index']}"
         )
+
+
+@tool_parameters(
+    tool_parameters_schema(
+        path=StringSchema(
+            "Path to llm-wiki raw/markdown/*.md "
+            "(often from [zotero_current_wiki_markdown_path=…])",
+        ),
+        required=["path"],
+    )
+)
+class GetMarkdownHeadingsTool(Tool):
+    """Return paper markdown heading outline with line numbers."""
+
+    name = "get_markdown_headings"
+    description = (
+        "List all headings in a literature markdown file with 1-indexed line numbers and "
+        "section_path. Call **once** per paper before read_file(offset=…) — replaces repeated "
+        "grep sweeps for section titles. Prefer rag_search first; use this when you need the "
+        "full outline or rag_search chunks lack start_line."
+    )
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    async def execute(self, path: str | None = None, **kwargs: Any) -> str:
+        if not path or not str(path).strip():
+            return "Error: path is required"
+        fp = Path(str(path).strip()).expanduser()
+        try:
+            fp = fp.resolve()
+        except OSError:
+            pass
+        if not fp.is_file():
+            return f"Error: file not found: {path}"
+        if fp.suffix.lower() != ".md":
+            return f"Error: expected a .md file: {path}"
+        try:
+            text = await asyncio.to_thread(
+                fp.read_text,
+                encoding="utf-8",
+                errors="ignore",
+            )
+        except OSError as exc:
+            return f"Error reading markdown: {exc}"
+        headings = extract_markdown_headings(text)
+        if not headings:
+            return json.dumps([], ensure_ascii=False)
+        return json.dumps(headings, ensure_ascii=False, indent=2)

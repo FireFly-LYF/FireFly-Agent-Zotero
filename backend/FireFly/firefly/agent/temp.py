@@ -9,6 +9,7 @@ from loguru import logger
 
 _SCRATCH_EXTENSIONS = frozenset({".py", ".sh", ".bat", ".ps1", ".js", ".ts", ".rb", ".pl"})
 _BRIDGE_TEMP_PREFIX = "zotero-"
+_SUBAGENT_LOG_PREFIX = "subagent-"
 
 _tracked_temp_files: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
     "tracked_temp_files",
@@ -41,6 +42,10 @@ def is_under_agent_temp(path: Path, workspace: Path) -> bool:
 
 def is_bridge_temp_file(path: Path) -> bool:
     return path.name.startswith(_BRIDGE_TEMP_PREFIX)
+
+
+def is_subagent_log_file(path: Path) -> bool:
+    return path.name.startswith(_SUBAGENT_LOG_PREFIX) and path.suffix == ".json"
 
 
 def validate_scratch_write_path(path: Path, workspace: Path | None) -> str | None:
@@ -108,6 +113,8 @@ def cleanup_agent_temp_turn(workspace: Path | None) -> None:
             if not is_under_agent_temp(p, workspace):
                 continue
             if is_bridge_temp_file(p):
+                continue
+            if is_subagent_log_file(p):
                 continue
             p.unlink(missing_ok=True)
         except OSError as exc:

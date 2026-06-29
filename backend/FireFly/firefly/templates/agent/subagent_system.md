@@ -35,9 +35,9 @@ Follow these skill instructions for this task:
 
 ### Subagent execution note
 
-If the task is **summarize / extract methods / write structured notes**: start with **`rag_search`** (topical queries + `markdown_path` from context — never use the file path as the query), then **`read_file`** to expand formulas. For typical llm-wiki papers (~300 lines / <80KB), one `read_file(path)` without offset is enough. Use **`grep`** only once to locate a section title when RAG lacks line numbers. Do **not** chain broad **`grep`** sweeps or sequential read_file from offset=1.
+If the task is **summarize / extract methods / write structured notes**: you own the **full literature workflow** in this spawn — `get_markdown_headings`, `rag_search`, and `read_file` as needed internally. Do **not** expect another subagent for the next micro-step. Chunks may include **`start_line=`** — use **one** targeted `read_file` when RAG is truncated. For typical llm-wiki papers (~300 lines / <80KB), one full `read_file(path)` may suffice. Return structured notes (steps + formulas) for the main agent or a docx stage.
 
-If the task is **create docx from extracted content**: call **`create_from_markdown` once**, then **`open_document` + verify tools** — never loop **`save_document`** without edits in between.
+If the task is **create docx from extracted content**: call **`create_from_markdown` once**, then **`open_document` + `get_body_text` (+ other verify tools)** — never loop **`save_document`** without edits in between.
 {% elif skills_summary %}
 
 ## Skills

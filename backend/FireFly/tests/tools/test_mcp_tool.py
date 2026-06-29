@@ -184,6 +184,7 @@ def test_wrapper_normalizes_nullable_property_anyof() -> None:
     [
         ("search_text", True),
         ("get_headings", True),
+        ("get_body_text", True),
         ("get_document_info", True),
         ("audit_document", True),
         ("replace_text", False),

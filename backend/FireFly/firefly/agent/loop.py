@@ -22,7 +22,7 @@ from firefly.zotero_interface.utils import (
 from firefly.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from firefly.agent.memory import Consolidator, Dream
 from firefly.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunSpec, AgentRunner
-from firefly.agent.summarizer import collect_zotero_turn_user_query, finalize_zotero_stream_reply, replace_last_assistant_text
+from firefly.agent.summarizer import Summarizer
 from firefly.agent.subagent import SubagentManager
 from firefly.agent.tools.cron import CronTool
 from firefly.agent.skills import BUILTIN_SKILLS_DIR
@@ -33,7 +33,7 @@ from firefly.agent.tools.registry import ToolRegistry
 from firefly.agent.tools.search import GlobTool, GrepTool
 from firefly.agent.tools.shell import ExecTool
 from firefly.agent.tools.spawn import SpawnTool
-from firefly.agent.tools.task_plan import AwaitStageTool, PlanTasksTool
+from firefly.agent.tools.plan import AwaitStageTool, PlanTasksTool
 from firefly.agent.tools.web import WebFetchTool, WebSearchTool
 from firefly.bus.events import InboundMessage, OutboundMessage
 from firefly.command import CommandContext, CommandRouter, register_builtin_commands
@@ -54,9 +54,14 @@ UNIFIED_SESSION_KEY = "unified:default"
 # Zotero 面板轮次多时，不宜把全部未固化消息都塞进 LLM（虽仍有 runner 的 token 裁剪，
 # Zotero 面板：限制送入 LLM 的历史 tool 结果体积，避免超大 exec 输出拖慢/卡死请求。
 ZOTERO_LLM_HISTORY_MAX_MESSAGES = 32
-# 主 agent 仅编排；执行工具由 subagent 通过 spawn(tools=...) 加载；阶段结束自动 await。
-ZOTERO_ORCHESTRATOR_TOOL_NAMES = ("plan_tasks", "spawn")
-# 送 LLM 的 tool 摘要（会话 JSONL 仍保留完整 content，见 ContextBuilder.prepare_messages_for_llm）
+# 主 agent：默认直接执行工具；plan 进行中仅 plan_tasks/spawn。
+from firefly.agent.toolregistry import (
+    ZOTERO_DIRECT_MODE_EXCLUDE,
+    ZOTERO_DIRECT_SKILLS,
+    ZOTERO_ORCHESTRATOR_TOOL_NAMES,
+    ZoteroSessionToolRegistry,
+)
+# 送 LLM 的历史：本轮不压缩 tool 结果；轮次结束后写入会话摘要（见 compress_session_tool_results）
 ZOTERO_HISTORY_TOOL_MAX_CHARS = 0
 ZOTERO_PERSISTED_TOOL_MAX_CHARS = 0
 
@@ -71,8 +76,9 @@ def _sanitize_history_for_llm(
     *,
     channel: str,
 ) -> list[dict[str, Any]]:
-    """历史消息送 LLM 前的渠道特殊处理（Zotero：tool 摘要）。"""
-    return ContextBuilder.prepare_messages_for_llm(history, channel=channel)
+    """历史消息送 LLM 前浅拷贝（Zotero 不在此压缩 tool 结果）。"""
+    del channel
+    return [dict(m) for m in history]
 
 
 def _coerce_literature_title_from_metadata(metadata: dict[str, Any] | None) -> str | None:
@@ -261,6 +267,7 @@ class AgentLoop:
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
+        self.summarizer = Summarizer(provider)
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -319,10 +326,14 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """注册默认工具集。"""
+        from firefly.config.paths import get_docx_dir
+
         allowed_dir = (
             self.workspace if (self.restrict_to_workspace or self.exec_config.sandbox) else None
         )
-        extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
+        extra_read: list[Path] | None = None
+        if allowed_dir:
+            extra_read = [BUILTIN_SKILLS_DIR, get_docx_dir()]
         self.tools.register(
             ReadFileTool(
                 workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read
@@ -349,7 +360,7 @@ class AgentLoop:
                 WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy)
             )
             self.tools.register(WebFetchTool(proxy=self.web_config.proxy))
-        from firefly.agent.tools.rag import RagIndexTool, RagSearchTool
+        from firefly.agent.tools.rag import GetMarkdownHeadingsTool, RagIndexTool, RagSearchTool
         from firefly.agent.tools.zotero import ZoteroReadItemTool, ZoteroSearchTool
 
         zotero_data_dir = os.environ.get("ZOTERO_DATA_DIR", "").strip() or None
@@ -361,6 +372,7 @@ class AgentLoop:
         )
         self.tools.register(RagSearchTool())
         self.tools.register(RagIndexTool())
+        self.tools.register(GetMarkdownHeadingsTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         self.tools.register(PlanTasksTool(manager=self.subagents))
@@ -371,13 +383,34 @@ class AgentLoop:
             )
         self.subagents.set_parent_registry(self.tools)
 
-    def _tools_for_llm(self, channel: str) -> ToolRegistry:
-        """主 agent 仅暴露编排工具；subagent 经 spawn 使用完整 registry。"""
-        del channel
-        registry, missing = self.tools.subset(list(ZOTERO_ORCHESTRATOR_TOOL_NAMES))
-        if missing:
-            logger.warning("Orchestrator tools missing from registry: {}", missing)
+    def _is_orchestration_active(self, session_key: str | None) -> bool:
+        if not session_key:
+            return False
+        orch = self.subagents._orchestrators.get(session_key)
+        if orch is None:
+            return False
+        return orch.current_stage_index >= 0 and not orch.is_complete
+
+    def _resolve_tools_for_llm(self, channel: str, session_key: str | None) -> ToolRegistry:
+        """Zotero：无 plan 时主 agent 直接调用执行工具，并可主动 plan_tasks；plan 进行中仅 plan_tasks/spawn。"""
+        if channel != "zotero":
+            return self.tools
+        if self._is_orchestration_active(session_key):
+            registry, missing = self.tools.subset(list(ZOTERO_ORCHESTRATOR_TOOL_NAMES))
+            if missing:
+                logger.warning("Orchestrator tools missing from registry: {}", missing)
+            return registry
+        registry = ToolRegistry()
+        for name in self.tools.tool_names:
+            if name in ZOTERO_DIRECT_MODE_EXCLUDE:
+                continue
+            if tool := self.tools.get(name):
+                registry.register(tool)
         return registry
+
+    def _tools_for_llm(self, channel: str, session_key: str | None = None) -> ToolRegistry:
+        """兼容测试与单点调用；Zotero 运行时应使用 ZoteroSessionToolRegistry。"""
+        return self._resolve_tools_for_llm(channel, session_key)
 
     async def _connect_mcp(self) -> None:
         """连接配置的 MCP 服务器（惰性、一次性）。"""
@@ -444,6 +477,7 @@ class AgentLoop:
         message_id: str | None = None,
         pending_queue: asyncio.Queue | None = None,
         auto_await_stage: Callable[[], Awaitable[str | None]] | None = None,
+        orchestrator_gate: Callable[[], Awaitable[str | None] | str | None] | None = None,
     ) -> tuple[str | None, list[str], list[dict], str, bool, list[dict[str, str]]]:
         """运行 agent 迭代循环。
 
@@ -499,9 +533,13 @@ class AgentLoop:
                 items.append({"role": "user", "content": merged})
             return items
 
+        tools: ToolRegistry | ZoteroSessionToolRegistry = self.tools
+        if channel == "zotero" and session is not None:
+            tools = ZoteroSessionToolRegistry(self, channel, session.key)
+
         result = await self.runner.run(AgentRunSpec(
             initial_messages=initial_messages,
-            tools=self._tools_for_llm(channel),
+            tools=tools,
             model=self.model,
             max_iterations=self.max_iterations,
             max_tool_result_chars=self.max_tool_result_chars,
@@ -519,6 +557,7 @@ class AgentLoop:
             on_reasoning_stream=loop_hook.on_reasoning_stream,
             on_llm_request=self._on_llm_request,
             auto_await_stage=auto_await_stage,
+            orchestrator_gate=orchestrator_gate,
         ))
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
@@ -736,6 +775,26 @@ class AgentLoop:
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
 
+    async def _compress_turn_tool_results(self, session_key: str, turn_start_index: int) -> None:
+        """轮次结束后后台压缩本会话中新落盘的 tool 结果，供后续提问省 token。"""
+        try:
+            session = self.sessions.get_or_create(session_key)
+            n = ContextBuilder.compress_session_tool_results(session, turn_start_index)
+            if n:
+                self.sessions.save(session)
+                logger.debug(
+                    "Compressed {} tool result(s) in session {} (from index {})",
+                    n,
+                    session_key,
+                    turn_start_index,
+                )
+        except Exception as e:
+            logger.warning(
+                "Background tool result compression failed for {}: {}",
+                session_key,
+                e,
+            )
+
     def stop(self) -> None:
         """停止 agent 循环。"""
         self._running = False
@@ -767,6 +826,9 @@ class AgentLoop:
                 self.sessions.save(session)
 
             session, pending = self.auto_compact.prepare_session(session, key)
+            if channel == "zotero":
+                if ContextBuilder.compress_session_tool_results(session, 0):
+                    self.sessions.save(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(
                 max_messages=_llm_history_max_messages_for_channel(channel),
@@ -785,9 +847,14 @@ class AgentLoop:
                 message_id=msg.metadata.get("message_id"),
             )
             lit_title = _coerce_literature_title_from_metadata(msg.metadata)
+            msg_count_before_save = len(session.messages)
             self._save_turn(session, all_msgs, 1 + len(history), literature_title=lit_title)
             self._clear_runtime_checkpoint(session)
             self.sessions.save(session)
+            if channel == "zotero":
+                self._schedule_background(
+                    self._compress_turn_tool_results(key, msg_count_before_save)
+                )
             self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
             return OutboundMessage(
                 channel=channel,
@@ -807,6 +874,10 @@ class AgentLoop:
 
         session, pending = self.auto_compact.prepare_session(session, key)
 
+        if msg.channel == "zotero":
+            if ContextBuilder.compress_session_tool_results(session, 0):
+                self.sessions.save(session)
+
         # 斜杠命令
         raw = msg.content.strip()
         ctx = CommandContext(msg=msg, session=session, key=key, raw=raw, loop=self)
@@ -818,10 +889,16 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        if msg.channel == "zotero" and isinstance(msg.content, str) and msg.content.strip():
+            self.subagents.reset_orchestrator(key)
+            self.subagents.reset_spawn_labels(key)
+
         history = session.get_history(
             max_messages=_llm_history_max_messages_for_channel(msg.channel),
             min_message_index=None,
         )
+
+        task_plan_ctx = self.subagents.format_plan_context(key)
 
         initial_messages = self.context.build_messages(
             history=_sanitize_history_for_llm(history, channel=msg.channel),
@@ -830,7 +907,8 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
-            task_plan=self.subagents.format_plan_context(key),
+            task_plan=task_plan_ctx,
+            orchestration_mode=self._is_orchestration_active(key),
         )
 
         logger.info(
@@ -872,6 +950,9 @@ class AgentLoop:
                 stored_user_request=user_to_store,
                 literature_title=lit_title,
             )
+            if msg.channel != "zotero":
+                self.subagents.reset_spawn_labels(session.key)
+                self.subagents.reset_orchestrator(session.key)
             if lit_title:
                 session.add_message("user", user_to_store, literature_title=lit_title)
             else:
@@ -885,8 +966,10 @@ class AgentLoop:
             orch = self.subagents._get_orchestrator(key)
             if not orch.is_active or orch.running_count() == 0:
                 return None
-            await _bus_progress("等待子任务完成…", tool_hint=True)
             return await self.subagents.await_task_stage(key)
+
+        async def _orchestrator_gate() -> str | None:
+            return await self.subagents.orchestrator_gate(session.key)
 
         final_content, _, all_msgs, stop_reason, had_injections, tool_events = (
             await self._run_agent_loop(
@@ -901,42 +984,55 @@ class AgentLoop:
                 message_id=msg.metadata.get("message_id"),
                 pending_queue=pending_queue,
                 auto_await_stage=_auto_await_stage,
+                orchestrator_gate=_orchestrator_gate,
             )
         )
+
+        turn_reasoning = self.summarizer.collect_turn_reasoning(all_msgs)
 
         if (
             msg.metadata.get("_source") == "zotero_stream"
             and on_answer_stream is not None
             and stop_reason != "error"
         ):
-            user_query = collect_zotero_turn_user_query(
+            user_query = self.summarizer.collect_user_query(
                 msg.content,
                 all_msgs,
                 had_injections=had_injections,
             )
             # 整轮 agent 任务（全部工具迭代）结束后，仅调用一次 summarizer。
-            summarized = await finalize_zotero_stream_reply(
-                self.provider,
+            summarized = await self.summarizer.finalize_stream_reply(
                 self.model,
                 user_query=user_query,
                 tool_events=tool_events,
                 agent_draft=final_content or "",
+                all_messages=all_msgs,
                 on_answer_stream=on_answer_stream,
                 on_stream_end=on_stream_end,
             )
             if summarized.strip():
                 final_content = summarized
-                replace_last_assistant_text(all_msgs, summarized)
+                self.summarizer.replace_last_assistant_text(all_msgs, summarized)
+
+        if turn_reasoning:
+            self.summarizer.attach_reasoning_to_last_visible_assistant(
+                all_msgs, turn_reasoning
+            )
 
         if final_content is None or not final_content.strip():
             final_content = EMPTY_FINAL_RESPONSE_MESSAGE
 
         # 保存本轮时跳过已提前持久化的用户消息
         save_skip = 1 + len(history) + (1 if user_persisted_early else 0)
+        msg_count_before_save = len(session.messages)
         self._save_turn(session, all_msgs, save_skip, literature_title=lit_title)
         self._clear_pending_user_turn(session)
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
+        if msg.channel == "zotero":
+            self._schedule_background(
+                self._compress_turn_tool_results(session.key, msg_count_before_save)
+            )
         self._schedule_background(self.consolidator.maybe_consolidate_by_tokens(session))
 
         # 当中途注入了后续消息时，后续自然语言回复

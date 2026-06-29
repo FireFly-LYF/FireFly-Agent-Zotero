@@ -61,10 +61,16 @@ class Session:
             sliced = unconsolidated
 
         # Avoid starting mid-turn when possible.
+        user_start: int | None = None
         for i, message in enumerate(sliced):
             if message.get("role") == "user":
-                sliced = sliced[i:]
+                user_start = i
                 break
+        if user_start is not None:
+            sliced = sliced[user_start:]
+        else:
+            # Crashed / partial turns may leave assistant+tool without a user anchor.
+            sliced = []
 
         # Drop orphan tool results at the front.
         start = find_legal_message_start(sliced)

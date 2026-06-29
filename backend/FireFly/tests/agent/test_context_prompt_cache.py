@@ -149,14 +149,18 @@ def test_partial_dream_processing_shows_only_remainder(tmp_path) -> None:
 
 
 def test_execution_rules_in_system_prompt(tmp_path) -> None:
-    """Zotero orchestration rules should appear in the system prompt."""
+    """Zotero direct mode documents agent-chosen mode; orchestration mode uses spawn."""
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
-    prompt = builder.build_system_prompt()
+    prompt = builder.build_system_prompt(orchestration_mode=False)
+    assert "rag_search" in prompt
+    assert "you choose the mode" in prompt.lower()
     assert "plan_tasks" in prompt
-    assert "spawn" in prompt
-    assert "auto-waits" in prompt.lower() or "auto-wait" in prompt.lower()
+
+    orch_prompt = builder.build_system_prompt(orchestration_mode=True)
+    assert "spawn" in orch_prompt
+    assert "auto-waits" in orch_prompt.lower() or "auto-wait" in orch_prompt.lower()
 
 
 def test_zotero_format_hint_in_system_prompt(tmp_path) -> None:

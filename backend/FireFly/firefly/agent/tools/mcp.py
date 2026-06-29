@@ -9,6 +9,7 @@ from loguru import logger
 
 from firefly.agent.tools.base import Tool
 from firefly.agent.tools.registry import ToolRegistry
+from firefly.utils.docx_paths import apply_docx_path_resolution
 
 
 def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None:
@@ -153,6 +154,9 @@ class MCPToolWrapper(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         from mcp import types
+
+        if "docx" in self._name.lower():
+            kwargs = apply_docx_path_resolution(kwargs)
 
         try:
             result = await asyncio.wait_for(

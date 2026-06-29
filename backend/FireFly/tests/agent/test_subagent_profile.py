@@ -35,6 +35,34 @@ class _StubTool(Tool):
         return "ok"
 
 
+def test_spawn_without_plan_tasks_rejected(tmp_path) -> None:
+    async def _run() -> None:
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        mgr = SubagentManager(
+            provider=provider,
+            workspace=tmp_path,
+            bus=bus,
+            max_tool_result_chars=8000,
+        )
+        parent = ToolRegistry()
+        parent.register(_StubTool("rag_search"))
+        mgr.set_parent_registry(parent)
+
+        msg = await mgr.spawn(
+            "find SLR definition",
+            session_key="zotero:chat-1",
+            tools=["rag_search"],
+            skills=["markdown", "zotero"],
+            context="markdown path",
+        )
+        assert msg.startswith("Error:")
+        assert "plan_tasks" in msg
+
+    asyncio.run(_run())
+
+
 def test_spawn_rejects_docx_create_without_verify_tools(tmp_path) -> None:
     async def _run() -> None:
         bus = MessageBus()
@@ -59,6 +87,86 @@ def test_spawn_rejects_docx_create_without_verify_tools(tmp_path) -> None:
         )
         assert msg.startswith("Error:")
         assert "open_document" in msg
+        assert "get_body_text" in msg
+
+    asyncio.run(_run())
+
+
+def test_spawn_labels_increment_per_session(tmp_path) -> None:
+    bus = MessageBus()
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    mgr = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    )
+    assert mgr._alloc_spawn_label("zotero:chat-1") == "spawn 1"
+    assert mgr._alloc_spawn_label("zotero:chat-1") == "spawn 2"
+    mgr.reset_spawn_labels("zotero:chat-1")
+    assert mgr._alloc_spawn_label("zotero:chat-1") == "spawn 1"
+
+
+def test_spawn_rejects_procedural_task_with_tool_names(tmp_path) -> None:
+    async def _run() -> None:
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        mgr = SubagentManager(
+            provider=provider,
+            workspace=tmp_path,
+            bus=bus,
+            max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        )
+        parent = ToolRegistry()
+        for name in ("rag_search", "get_markdown_headings", "read_file"):
+            parent.register(_StubTool(name))
+        mgr.set_parent_registry(parent)
+
+        msg = await mgr.spawn(
+            "读取论文标题结构，使用get_markdown_headings获取论文的完整标题结构",
+            tools=["rag_search", "get_markdown_headings", "read_file"],
+            skills=["markdown", "zotero"],
+            context="markdown path in context",
+        )
+        assert msg.startswith("Error:")
+        assert "deliverable" in msg.lower() or "get_markdown_headings" in msg
+
+    asyncio.run(_run())
+
+
+def test_spawn_accepts_deliverable_task(tmp_path) -> None:
+    async def _run() -> None:
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        mgr = SubagentManager(
+            provider=provider,
+            workspace=tmp_path,
+            bus=bus,
+            max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        )
+        parent = ToolRegistry()
+        for name in ("rag_search", "get_markdown_headings", "read_file"):
+            parent.register(_StubTool(name))
+        mgr.set_parent_registry(parent)
+        mgr.runner.run = AsyncMock(return_value=MagicMock(
+            stop_reason="completed",
+            final_content="notes",
+            messages=[],
+            tool_events=[],
+            tools_used=[],
+        ))
+
+        msg = await mgr.spawn(
+            "从论文 markdown 提取抗干扰方法步骤与关键公式，返回结构化笔记",
+            tools=["rag_search", "get_markdown_headings", "read_file"],
+            skills=["markdown", "zotero"],
+            context="path=/tmp/paper.md",
+            session_key=None,
+        )
+        assert "started" in msg.lower()
 
     asyncio.run(_run())
 

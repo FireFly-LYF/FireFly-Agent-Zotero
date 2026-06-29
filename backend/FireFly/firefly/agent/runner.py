@@ -87,6 +87,7 @@ class AgentRunSpec:
     on_reasoning_stream: Callable[[str], Awaitable[None]] | None = None
     on_llm_request: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     auto_await_stage: Callable[[], Awaitable[str | None]] | None = None
+    orchestrator_gate: Callable[[], Awaitable[str | None] | str | None] | None = None
 
 
 @dataclass(slots=True)
@@ -228,12 +229,7 @@ class AgentRunner:
                 if not self._is_zotero_session(spec):
                     messages_for_model = self._microcompact(messages_for_model)
                     messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
-                else:
-                    from firefly.agent.context import ContextBuilder
-
-                    messages_for_model = ContextBuilder.prepare_messages_for_llm(
-                        messages_for_model, channel="zotero",
-                    )
+                # Zotero：本轮 tool 结果完整送入模型；轮次结束后再压缩会话历史
                 messages_for_model = self._snip_history(spec, messages_for_model)
                 # 裁剪后可能生成新的孤儿消息，需清理。
                 messages_for_model = self._drop_orphan_tool_results(messages_for_model)
@@ -478,6 +474,16 @@ class AgentRunner:
                 context.stop_reason = stop_reason
                 await hook.after_iteration(context)
                 break
+
+            gate_msg = await self._call_orchestrator_gate(spec)
+            if gate_msg:
+                messages.append({"role": "user", "content": gate_msg})
+                logger.info(
+                    "Orchestrator gate blocked premature final reply for {}",
+                    spec.session_key or "default",
+                )
+                await hook.after_iteration(context)
+                continue
 
             messages.append(assistant_message or build_assistant_message(
                 clean,
@@ -903,6 +909,24 @@ class AgentRunner:
         })
         tools_used.append("await_stage(auto)")
 
+    @staticmethod
+    async def _call_orchestrator_gate(spec: AgentRunSpec) -> str | None:
+        if spec.orchestrator_gate is None:
+            return None
+        try:
+            result = spec.orchestrator_gate()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            logger.exception("orchestrator_gate failed")
+            return (
+                "[Orchestration gate] Internal error while checking subagent status. "
+                f"Continue the plan before replying. ({exc})"
+            )
+        if result and str(result).strip():
+            return str(result).strip()
+        return None
+
     def _normalize_tool_result(
         self,
         spec: AgentRunSpec,
@@ -964,17 +988,24 @@ class AgentRunner:
         if len(signatures) < _REPEAT_TOOL_LOOP_THRESHOLD:
             return None
         recent = signatures[:_REPEAT_TOOL_LOOP_THRESHOLD]
-        if len(set(recent)) != 1:
-            return None
-        name, _ = recent[0]
-        return (
-            "[Tool loop detected] "
-            f"`{name}` was called {_REPEAT_TOOL_LOOP_THRESHOLD} times with the same arguments. "
-            "Stop repeating that call. "
-            "For docx: after `create_from_markdown`, call `open_document` then "
-            "`get_headings` + `search_text` (same turn) — do not loop `save_document` "
-            "unless you opened the file and made edits."
-        )
+        if len(set(recent)) == 1:
+            name, _ = recent[0]
+            return (
+                "[Tool loop detected] "
+                f"`{name}` was called {_REPEAT_TOOL_LOOP_THRESHOLD} times with the same arguments. "
+                "Stop repeating that call. "
+                "For docx: after `create_from_markdown`, call `open_document` then "
+                "`get_body_text` + `get_headings` (same turn) — do not loop `save_document` "
+                "unless you opened the file and made edits."
+            )
+        rag_recent = [name for name, _ in recent if name == "rag_search"]
+        if len(rag_recent) >= _REPEAT_TOOL_LOOP_THRESHOLD:
+            return (
+                "[Tool loop detected] `rag_search` was called repeatedly with different queries. "
+                "Stop re-searching. Use the best-matching chunk's `start_line=` with "
+                "`read_file(offset=…, limit=…)` once, or `get_markdown_headings` for the outline."
+            )
+        return None
 
     @staticmethod
     def _drop_orphan_tool_results(
@@ -1090,6 +1121,22 @@ class AgentRunner:
                 updated[idx]["content"] = normalized
         return updated
 
+    @staticmethod
+    def _shrink_tool_results_for_budget(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Summarize large tool results on copies only (for token snip, not session storage)."""
+        from firefly.agent.context import _summarize_tool_content_for_llm
+
+        shrunk: list[dict[str, Any]] = []
+        for msg in messages:
+            copy = dict(msg)
+            if copy.get("role") == "tool" and isinstance(copy.get("content"), str):
+                name = str(copy.get("name") or "tool")
+                content = copy["content"]
+                if len(content) > 2_000:
+                    copy["content"] = _summarize_tool_content_for_llm(name, content)
+            shrunk.append(copy)
+        return shrunk
+
     def _snip_history(
         self,
         spec: AgentRunSpec,
@@ -1114,6 +1161,14 @@ class AgentRunner:
             messages,
             spec.tools.get_definitions(),
         )
+        if estimate > budget:
+            messages = self._shrink_tool_results_for_budget(messages)
+            estimate, _ = estimate_prompt_tokens_chain(
+                self.provider,
+                spec.model,
+                messages,
+                spec.tools.get_definitions(),
+            )
         if estimate <= budget:
             return messages
 

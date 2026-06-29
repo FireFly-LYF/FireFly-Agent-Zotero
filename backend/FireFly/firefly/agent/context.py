@@ -23,6 +23,8 @@ _LLM_TOOL_SUMMARY_MAX_CHARS = 1_200
 _LLM_READ_FILE_PREVIEW_LINES = 8
 _LLM_HEADING_PREVIEW = 12
 _LLM_SEARCH_HITS_PREVIEW = 5
+from firefly.agent.toolregistry import ZOTERO_DIRECT_SKILLS
+
 # 主 agent 自身可调用的编排工具，不出现在委派目录中
 _DELEGATION_CATALOG_EXCLUDE = frozenset({"plan_tasks", "spawn", "await_stage"})
 
@@ -62,14 +64,22 @@ class ContextBuilder:
         self,
         skill_names: list[str] | None = None,
         channel: str | None = None,
+        *,
+        orchestration_mode: bool = False,
     ) -> str:
-        """从身份信息、记忆与近期历史构建系统提示词（Zotero 编排模式）。"""
-        del channel  # 本项目仅 Zotero 通道；保留参数以兼容调用方签名
-        parts = [self._get_identity()]
+        """构建系统提示词：默认主 agent 直接执行；plan 进行中为编排模式。"""
+        del channel
+        parts = [self._get_identity(orchestration_mode=orchestration_mode)]
 
-        catalog = self._build_delegation_catalog()
-        if catalog:
-            parts.append(catalog)
+        if orchestration_mode:
+            catalog = self._build_delegation_catalog()
+            if catalog:
+                parts.append(catalog)
+        else:
+            names = skill_names or list(ZOTERO_DIRECT_SKILLS)
+            skills_content = self.skills.load_skills_for_context(names)
+            if skills_content:
+                parts.append(f"## Active Skills\n\n{skills_content}")
 
         memory = self.memory.get_memory_context()
         if memory:
@@ -101,17 +111,22 @@ class ContextBuilder:
             tools_section=tools_section,
         )
 
-    def _get_identity(self) -> str:
+    def _get_identity(self, *, orchestration_mode: bool = False) -> str:
         """获取核心身份信息片段。"""
+        from firefly.config.paths import get_docx_dir
+
         workspace_path = str(self.workspace.expanduser().resolve())
+        docx_dir = str(get_docx_dir().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
         return render_template(
             "agent/identity.md",
             workspace_path=workspace_path,
+            docx_dir=docx_dir,
             runtime=runtime,
             platform_policy=render_template("agent/platform_policy.md", system=system),
+            orchestration_mode=orchestration_mode,
         )
 
     @staticmethod
@@ -121,9 +136,20 @@ class ContextBuilder:
         task_plan: str | None = None,
     ) -> str:
         """构建不可信的运行时元数据块，注入到用户消息前。"""
+        from firefly.config.paths import get_docx_dir
+
         lines = [f"Current Time: {current_time_str(timezone)}"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        if channel == "zotero":
+            docx_root = get_docx_dir().resolve()
+            lines += [
+                f"[firefly_docx_dir={docx_root}]",
+                (
+                    "Relative .docx paths (e.g. docx/report.docx or report.docx) resolve under "
+                    "firefly_docx_dir (llm-wiki/docx) for docx-mcp and list_dir/read_file — not under workspace."
+                ),
+            ]
         if session_summary:
             lines += ["", "[Resumed Session]", session_summary]
         if task_plan:
@@ -167,6 +193,7 @@ class ContextBuilder:
         current_role: str = "user",
         session_summary: str | None = None,
         task_plan: str | None = None,
+        orchestration_mode: bool = False,
     ) -> list[dict[str, Any]]:
         """构建一次 LLM 调用所需的完整消息列表。"""
         runtime_ctx = self._build_runtime_context(
@@ -183,7 +210,14 @@ class ContextBuilder:
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
         messages = [
-            {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel)},
+            {
+                "role": "system",
+                "content": self.build_system_prompt(
+                    skill_names,
+                    channel=channel,
+                    orchestration_mode=orchestration_mode,
+                ),
+            },
             *history,
         ]
         if messages[-1].get("role") == current_role:
@@ -200,21 +234,46 @@ class ContextBuilder:
         *,
         channel: str | None = None,
     ) -> list[dict[str, Any]]:
-        """构建完上下文后、送 LLM 前的处理（深拷贝，不修改原 messages）。"""
+        """构建完上下文后、送 LLM 前的浅拷贝（不压缩 tool 结果）。
+
+        Zotero：本轮进行中保持完整 tool 内容；轮次结束后由
+        ``compress_session_tool_results`` 写入会话摘要，供后续提问省 token。
+        """
         del channel
-        out: list[dict[str, Any]] = []
-        for raw in messages:
-            msg = dict(raw)
-            role = msg.get("role")
-            if role == "tool" and isinstance(msg.get("content"), str):
-                msg["content"] = _summarize_tool_content_for_llm(
-                    str(msg.get("name") or "tool"),
-                    str(msg["content"]),
-                )
-            elif role == "assistant" and msg.get("tool_calls"):
-                msg = compact_tool_call_assistant_for_storage(msg)
-            out.append(msg)
-        return out
+        return [dict(m) for m in messages]
+
+    @staticmethod
+    def compress_session_tool_results(
+        session: Any,
+        start_index: int = 0,
+        end_index: int | None = None,
+    ) -> int:
+        """将会话中 tool 消息压缩为摘要并写回 session.messages（原地修改）。返回变更条数。"""
+        messages = session.messages
+        end = len(messages) if end_index is None else min(max(0, end_index), len(messages))
+        start = max(0, start_index)
+        changed = 0
+        for i in range(start, end):
+            msg = messages[i]
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("tool_result_summarized"):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                msg["tool_result_summarized"] = True
+                continue
+            name = str(msg.get("name") or "tool")
+            summarized = _summarize_tool_content_for_llm(name, content)
+            if summarized != content:
+                msg["content"] = summarized
+            msg["tool_result_summarized"] = True
+            changed += 1
+        if changed:
+            from datetime import datetime
+
+            session.updated_at = datetime.now()
+        return changed
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """构建用户消息内容，可选附带 base64 编码图片。"""
@@ -368,6 +427,25 @@ def _summarize_headings(content: str, *, max_chars: int) -> str:
     return body if len(body) <= max_chars else body[: max_chars - 3] + "..."
 
 
+def _summarize_body_text(content: str, *, max_chars: int) -> str:
+    data = _try_parse_json(content)
+    if not isinstance(data, dict):
+        return _summarize_tool_content_for_llm("get_body_text", content, max_chars=max_chars)
+    body = str(data.get("body") or "")
+    footnotes = str(data.get("footnotes") or "")
+    body_lines = body.splitlines()
+    header = f"[get_body_text: {len(body)} body chars"
+    if footnotes:
+        header += f", {len(footnotes)} footnote chars"
+    header += "; full text in session]"
+    lines = [header]
+    lines.extend(body_lines[:_LLM_READ_FILE_PREVIEW_LINES])
+    if len(body_lines) > _LLM_READ_FILE_PREVIEW_LINES:
+        lines.append(f"... ({len(body_lines) - _LLM_READ_FILE_PREVIEW_LINES} more body lines in session)")
+    result = "\n".join(lines)
+    return result if len(result) <= max_chars else result[: max_chars - 3] + "..."
+
+
 def _summarize_search_text(content: str, *, max_chars: int) -> str:
     data = _try_parse_json(content)
     if not isinstance(data, list):
@@ -387,6 +465,41 @@ def _summarize_search_text(content: str, *, max_chars: int) -> str:
     return body if len(body) <= max_chars else body[: max_chars - 3] + "..."
 
 
+def _summarize_rag_search(content: str, *, max_chars: int) -> str:
+    """保留 RAG chunk 标题行与每块开头，便于后续轮次定位而无需重搜。"""
+    lines = content.splitlines()
+    chunk_count = sum(1 for line in lines if line.startswith("--- chunk"))
+    if chunk_count == 0:
+        return content if len(content) <= max_chars else content[: max_chars - 3] + "..."
+
+    kept: list[str] = []
+    in_chunk = False
+    chunk_body_lines = 0
+    for line in lines:
+        if line.startswith("RAG search results") or line.startswith("query:") or line.startswith("Retrieved"):
+            kept.append(line)
+            continue
+        if line.startswith("Use these passages") or line.startswith("--- chunk"):
+            if line.startswith("--- chunk"):
+                in_chunk = True
+                chunk_body_lines = 0
+            kept.append(line)
+            continue
+        if in_chunk:
+            if chunk_body_lines < 4:
+                kept.append(line[:240])
+                chunk_body_lines += 1
+            elif line.startswith("--- chunk"):
+                in_chunk = True
+                chunk_body_lines = 0
+                kept.append(line)
+
+    header = f"[rag_search: {chunk_count} chunk(s), {len(content)} chars in session]"
+    body = "\n".join(kept)
+    result = f"{header}\n{body}\n[Expand with read_file(offset=start_line); avoid repeat rag_search.]"
+    return result if len(result) <= max_chars else result[: max_chars - 3] + "..."
+
+
 def _summarize_tool_content_for_llm(
     tool_name: str,
     content: str,
@@ -403,10 +516,14 @@ def _summarize_tool_content_for_llm(
     lowered = tool_name.lower()
     if lowered == "read_file" or lowered.endswith("_read_file"):
         return _summarize_read_file(text, max_chars=max_chars)
-    if "get_headings" in lowered:
+    if "get_headings" in lowered or "get_markdown_headings" in lowered:
         return _summarize_headings(text, max_chars=max_chars)
+    if "get_body_text" in lowered:
+        return _summarize_body_text(text, max_chars=max_chars)
     if "search_text" in lowered:
         return _summarize_search_text(text, max_chars=max_chars)
+    if lowered == "rag_search" or lowered.endswith("_rag_search"):
+        return _summarize_rag_search(text, max_chars=max_chars)
     if any(
         marker in lowered
         for marker in (

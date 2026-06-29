@@ -556,6 +556,48 @@ def test_openai_compat_preserves_message_level_reasoning_fields() -> None:
     assert sanitized[1]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig"}}
 
 
+def test_openai_compat_zhipu_keeps_outbound_reasoning_for_tool_chain() -> None:
+    """Zhipu tool chains need reasoning_content round-tripped (see Zhipu thinking-mode docs)."""
+    spec = find_by_name("zhipu")
+    with patch("firefly.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider(spec=spec)
+
+    sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "hidden chain",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "fn", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "fn", "content": "ok"},
+    ])
+
+    assert sanitized[1]["reasoning_content"] == "hidden chain"
+
+
+def test_openai_compat_zhipu_enables_thinking_for_glm_models() -> None:
+    spec = find_by_name("zhipu")
+    with patch("firefly.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider(spec=spec, default_model="glm-4.5-air")
+    kwargs = provider._build_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        model="glm-4.5-air",
+        max_tokens=1024,
+        temperature=0.7,
+        reasoning_effort=None,
+        tool_choice=None,
+    )
+    assert kwargs["extra_body"]["thinking"] == {"type": "enabled", "clear_thinking": False}
+
+
 def test_openai_compat_keeps_tool_calls_after_consecutive_assistant_messages() -> None:
     with patch("firefly.providers.openai_compat_provider.AsyncOpenAI"):
         provider = OpenAICompatProvider()

@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,8 @@ from loguru import logger
 from firefly.agent.hook import AgentHook, AgentHookContext
 from firefly.agent.orchestrator import TaskOrchestrator
 from firefly.utils.prompt_templates import render_template
-from firefly.agent.runner import AgentRunSpec, AgentRunner
+from firefly.agent.runner import AgentRunResult, AgentRunSpec, AgentRunner
+from firefly.agent.temp import get_agent_temp_dir
 from firefly.agent.skills import BUILTIN_SKILLS_DIR
 from firefly.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from firefly.agent.tools.registry import ToolRegistry
@@ -87,6 +90,9 @@ class _SubagentHook(AgentHook):
 class SubagentManager:
     """管理后台子代理执行。"""
 
+    _LOG_DIR = "subagent-logs"
+    _MAX_LOG_CONTENT_CHARS = 32_000
+
     def __init__(
         self,
         provider: LLMProvider,
@@ -116,6 +122,22 @@ class SubagentManager:
         self._parent_registry: ToolRegistry | None = None
         self._orchestrators: dict[str, TaskOrchestrator] = {}
         self._session_manager: SessionManager | None = None
+        self._spawn_seq: dict[str, int] = {}
+        self._spawn_register_locks: dict[str, asyncio.Lock] = {}
+
+    def reset_spawn_labels(self, session_key: str) -> None:
+        """New user turn: UI labels restart at spawn 1."""
+        self._spawn_seq[session_key] = 0
+
+    def reset_orchestrator(self, session_key: str) -> None:
+        """New user turn: drop stale plan so the main agent returns to direct-tool mode."""
+        self._orchestrators.pop(session_key, None)
+
+    def _alloc_spawn_label(self, session_key: str | None) -> str:
+        key = session_key or "_default"
+        n = self._spawn_seq.get(key, 0) + 1
+        self._spawn_seq[key] = n
+        return f"spawn {n}"
 
     def set_session_manager(self, sessions: SessionManager) -> None:
         """绑定会话管理器，供 spawn 时注入 Zotero 运行时上下文。"""
@@ -129,6 +151,7 @@ class SubagentManager:
         return self._orchestrators[session_key]
 
     def start_task_plan(self, session_key: str, stages: list[str]) -> str:
+        self.reset_spawn_labels(session_key)
         return self._get_orchestrator(session_key).start_plan(stages)
 
     async def await_task_stage(self, session_key: str) -> str:
@@ -136,6 +159,35 @@ class SubagentManager:
 
     def format_plan_context(self, session_key: str) -> str | None:
         return self._get_orchestrator(session_key).format_context_block()
+
+    async def orchestrator_gate(self, session_key: str) -> str | None:
+        """Block premature user replies until subagents finish and stages advance."""
+        from firefly.agent.context import ContextBuilder
+
+        orch = self._orchestrators.get(session_key)
+        if orch is None or orch.current_stage_index < 0:
+            return None
+
+        if orch.running_count() > 0:
+            result = await orch.await_current_stage()
+            return ContextBuilder.format_stage_results_injection(result)
+
+        if orch.is_active and orch.pending:
+            if all(p.status != "running" for p in orch.pending.values()):
+                result = await orch.await_current_stage()
+                return ContextBuilder.format_stage_results_injection(result)
+
+        if orch.is_active and not orch.pending:
+            stage = orch.stages[orch.current_stage_index]
+            return (
+                f"{ContextBuilder._RUNTIME_CONTEXT_TAG}\n"
+                f"[Orchestration gate] Stage {stage.index + 1}/{len(orch.stages)} is active "
+                f"({stage.description}) but no subagent is running. "
+                "Call `spawn` for this stage — do **not** tell the user work is still in progress.\n"
+                f"{ContextBuilder._RUNTIME_CONTEXT_END}"
+            )
+
+        return None
 
     def set_parent_registry(self, registry: ToolRegistry) -> None:
         """绑定主 agent 工具注册表，供 task profile 子集引用（含 MCP）。"""
@@ -156,7 +208,7 @@ class SubagentManager:
         if not tools:
             return (
                 "Error: spawn requires `tools`. "
-                "Example: tools=[\"rag_search\", \"read_file\", \"grep\"]. "
+                "Example: tools=[\"rag_search\", \"get_markdown_headings\", \"read_file\"]. "
                 "See Delegation catalog / common spawn profiles in the system prompt."
             )
         if not skills:
@@ -173,58 +225,84 @@ class SubagentManager:
         if "zotero" in skills and "rag_search" not in tools:
             return (
                 "Error: spawn with zotero skill must include rag_search in tools=. "
-                "Literature extraction profile: tools=[\"rag_search\", \"read_file\", \"grep\"], "
+                "Literature extraction profile: tools=[\"rag_search\", \"get_markdown_headings\", \"read_file\"], "
                 "skills=[\"markdown\", \"zotero\"]."
             )
         err = self._validate_docx_spawn_tools(tools, skills)
         if err:
             return err
+        err = self._validate_spawn_task_deliverable(task)
+        if err:
+            return err
 
-        user_content, ctx_err = self._compose_subagent_user_content(
-            task=task,
-            context=context,
-            session_key=session_key,
-        )
-        if ctx_err:
-            return ctx_err
-
-        task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id}
-
-        defer_announce = False
         if session_key:
-            orch = self._get_orchestrator(session_key)
-            if orch.is_active:
-                defer_announce = True
-                orch.register_subtask(task_id, display_label, task)
+            orch = self._orchestrators.get(session_key)
+            if orch is None or orch.current_stage_index < 0:
+                return (
+                    "Error: call `plan_tasks` before `spawn`. "
+                    "For single-step questions (definitions, section Q&A, one-shot reads), "
+                    "use rag_search / read_file / skills on the **main agent** path — do not spawn."
+                )
+            if not orch.is_active and orch.is_complete:
+                return (
+                    "Error: the task plan is already complete. Reply to the user from "
+                    "[Stage Results]; do not spawn again unless you start a new `plan_tasks`."
+                )
 
-        bg_task = asyncio.create_task(
-            self._run_subagent(
-                task_id, user_content, display_label, origin,
-                tool_names=tools, skill_names=skills,
+        session_key_norm = session_key or ""
+        lock = self._spawn_register_locks.setdefault(session_key_norm or "_default", asyncio.Lock())
+        async with lock:
+            if session_key:
+                orch = self._get_orchestrator(session_key)
+                if orch.is_active and (
+                    len(orch.stages) > 1
+                    and orch.current_stage_index == 0
+                    and "docx" in skills
+                ):
+                    return (
+                        "Error: Stage 1 is literature extraction. "
+                        "Do not spawn docx until [Stage Results] from stage 1 are injected."
+                    )
+
+            user_content, ctx_err = self._compose_subagent_user_content(
+                task=task,
+                context=context,
                 session_key=session_key,
-                defer_announce=defer_announce,
             )
-        )
-        self._running_tasks[task_id] = bg_task
-        if session_key:
-            self._session_tasks.setdefault(session_key, set()).add(task_id)
+            if ctx_err:
+                return ctx_err
 
-        if defer_announce:
-            await self._publish_tool_step(
-                origin,
-                f"子任务启动: {display_label}",
+            task_id = str(uuid.uuid4())[:8]
+            display_label = self._alloc_spawn_label(session_key)
+            origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+
+            defer_announce = False
+            if session_key:
+                orch = self._get_orchestrator(session_key)
+                if orch.is_active:
+                    defer_announce = True
+                    orch.register_subtask(task_id, display_label, task)
+
+            bg_task = asyncio.create_task(
+                self._run_subagent(
+                    task_id, user_content, display_label, origin,
+                    tool_names=tools, skill_names=skills,
+                    session_key=session_key,
+                    defer_announce=defer_announce,
+                )
             )
+            self._running_tasks[task_id] = bg_task
+            if session_key:
+                self._session_tasks.setdefault(session_key, set()).add(task_id)
 
-        def _cleanup(_: asyncio.Task) -> None:
-            self._running_tasks.pop(task_id, None)
-            if session_key and (ids := self._session_tasks.get(session_key)):
-                ids.discard(task_id)
-                if not ids:
-                    del self._session_tasks[session_key]
+            def _cleanup(_: asyncio.Task) -> None:
+                self._running_tasks.pop(task_id, None)
+                if session_key and (ids := self._session_tasks.get(session_key)):
+                    ids.discard(task_id)
+                    if not ids:
+                        del self._session_tasks[session_key]
 
-        bg_task.add_done_callback(_cleanup)
+            bg_task.add_done_callback(_cleanup)
 
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
         if defer_announce and session_key:
@@ -251,6 +329,7 @@ class SubagentManager:
     ) -> None:
         """执行子代理任务并广播结果。"""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+        started_at = datetime.now(timezone.utc)
 
         try:
             tools, tools_err = self._build_tools(tool_names)
@@ -289,25 +368,38 @@ class SubagentManager:
                 fail_on_tool_error=True,
                 concurrent_tools=True,
                 session_key=session_key,
+                workspace=self.workspace,
                 on_reasoning_stream=None,
             ))
+            log_path = self._persist_subagent_run(
+                task_id=task_id,
+                label=label,
+                task=user_content,
+                session_key=session_key,
+                result=result,
+                ok=result.stop_reason == "completed",
+                started_at=started_at,
+            )
+            log_note = f"\n\nDebug log: {log_path}"
+
             if result.stop_reason == "tool_error":
                 await self._finish_subtask(
                     task_id, label, user_content,
-                    self._format_partial_progress(result),
+                    self._format_partial_progress(result) + log_note,
                     origin, session_key, ok=False, defer_announce=defer_announce,
                 )
                 return
-            if result.stop_reason == "error":
+            if result.stop_reason != "completed":
+                body = result.error or result.final_content or "Error: subagent execution failed."
                 await self._finish_subtask(
                     task_id, label, user_content,
-                    result.error or "Error: subagent execution failed.",
+                    body + log_note,
                     origin, session_key, ok=False, defer_announce=defer_announce,
                 )
                 return
             final_result = result.final_content or "Task completed but no final response was generated."
 
-            logger.info("Subagent [{}] completed successfully", task_id)
+            logger.info("Subagent [{}] completed successfully (log: {})", task_id, log_path)
             await self._finish_subtask(
                 task_id, label, user_content, final_result, origin, session_key,
                 ok=True, defer_announce=defer_announce,
@@ -573,6 +665,7 @@ class SubagentManager:
         required = {
             "mcp_docx-mcp_open_document",
             "mcp_docx-mcp_get_document_info",
+            "mcp_docx-mcp_get_body_text",
             "mcp_docx-mcp_get_headings",
             "mcp_docx-mcp_search_text",
         }
@@ -582,7 +675,7 @@ class SubagentManager:
                 "Error: docx create spawn must include verify tools: "
                 f"{', '.join(missing)}. "
                 "Profile: tools=[create_from_markdown, open_document, get_document_info, "
-                "get_headings, search_text] (+ save_document only if editing after open)."
+                "get_body_text, get_headings, search_text] (+ save_document only if editing after open)."
             )
         return None
 
@@ -611,6 +704,135 @@ class SubagentManager:
         if missing:
             return f"Error: unknown skills: {', '.join(missing)}"
         return None
+
+    _SPAWN_PROCEDURE_TOOL_NAMES = (
+        "get_markdown_headings",
+        "rag_search",
+        "rag_index",
+        "read_file",
+        "grep",
+        "glob",
+        "open_document",
+        "create_from_markdown",
+        "get_body_text",
+        "search_text",
+        "get_headings",
+        "save_document",
+    )
+    _SPAWN_PROCEDURE_PATTERNS = (
+        re.compile(r"使用\s*(get_markdown|rag_search|read_file|grep|open_document)", re.I),
+        re.compile(r"(首先|第一步|然后|接着).{0,48}(读取|搜索|调用|使用)", re.I),
+        re.compile(r"\bfirst\b.{0,40}\bthen\b", re.I),
+        re.compile(r"读取论文标题结构", re.I),
+        re.compile(r"获取论文的完整标题结构", re.I),
+    )
+
+    @classmethod
+    def _validate_spawn_task_deliverable(cls, task: str) -> str | None:
+        """Reject procedural spawn tasks; subagent chooses tools internally."""
+        text = (task or "").strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        for name in cls._SPAWN_PROCEDURE_TOOL_NAMES:
+            if name in lowered:
+                return (
+                    "Error: spawn `task` must describe the **deliverable**, not which tools to call. "
+                    f"Remove tool name {name!r} from task — list it in tools= instead. "
+                    "Example task: 'Extract anti-jamming method steps and key formulas from the paper "
+                    "markdown; return structured notes for docx.' "
+                    "Put markdown paths in `context`."
+                )
+        for pattern in cls._SPAWN_PROCEDURE_PATTERNS:
+            if pattern.search(text):
+                return (
+                    "Error: spawn `task` must be outcome-focused, not a step-by-step procedure. "
+                    "Bad: '读取标题结构，使用 get_markdown_headings…'. "
+                    "Good: '从论文 markdown 提取抗干扰方法步骤与关键公式，返回结构化笔记'. "
+                    "Paths go in `context`; tool choice is the subagent's job."
+                )
+        if re.search(r"\.md['\"]?", text, re.I) and len(text) > 120:
+            return (
+                "Error: long file paths belong in spawn `context`, not in `task`. "
+                "Task should state the deliverable only."
+            )
+        return None
+
+    def _subagent_log_dir(self) -> Path:
+        root = get_agent_temp_dir(self.workspace) / self._LOG_DIR
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @classmethod
+    def _truncate_log_text(cls, value: str, limit: int | None = None) -> str:
+        cap = limit if limit is not None else cls._MAX_LOG_CONTENT_CHARS
+        if len(value) <= cap:
+            return value
+        return value[: cap - 24] + "\n... [truncated in log]"
+
+    @classmethod
+    def _sanitize_subagent_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            item = dict(msg)
+            role = str(item.get("role") or "")
+            content = item.get("content")
+            if role == "system":
+                text = content if isinstance(content, str) else str(content)
+                item["content"] = cls._truncate_log_text(text, 12_000)
+            elif isinstance(content, str):
+                item["content"] = cls._truncate_log_text(content)
+            elif isinstance(content, list):
+                blocks: list[Any] = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        blocks.append(block)
+                        continue
+                    b = dict(block)
+                    if b.get("type") == "text" and isinstance(b.get("text"), str):
+                        b["text"] = cls._truncate_log_text(b["text"])
+                    elif b.get("type") in {"image", "image_url"}:
+                        b = {"type": b.get("type"), "note": "[omitted binary image block]"}
+                    blocks.append(b)
+                item["content"] = blocks
+            out.append(item)
+        return out
+
+    def _persist_subagent_run(
+        self,
+        *,
+        task_id: str,
+        label: str,
+        task: str,
+        session_key: str | None,
+        result: AgentRunResult,
+        ok: bool,
+        started_at: datetime,
+    ) -> Path:
+        """Write a JSON debug bundle under workspace/temp/subagent-logs."""
+        finished_at = datetime.now(timezone.utc)
+        safe_label = label.replace(" ", "-")
+        path = self._subagent_log_dir() / f"subagent-{task_id}-{safe_label}.json"
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "label": label,
+            "task": task,
+            "session_key": session_key,
+            "ok": ok,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "stop_reason": result.stop_reason,
+            "error": result.error,
+            "tools_used": list(result.tools_used),
+            "tool_events": list(result.tool_events),
+            "final_content": result.final_content,
+            "messages": self._sanitize_subagent_messages(result.messages),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("Subagent [{}] debug log: {}", task_id, path)
+        return path
 
     async def cancel_by_session(self, session_key: str) -> int:
         """取消指定会话下所有子代理，返回取消数量。"""

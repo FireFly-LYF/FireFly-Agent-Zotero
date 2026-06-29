@@ -12,10 +12,16 @@ if TYPE_CHECKING:
 @tool_parameters(
     tool_parameters_schema(
         task=StringSchema(
-            "What the subagent must do. Keep this focused; put paths, prior-stage "
-            "outputs, and reference material in `context`."
+            "Deliverable for this stage — what the subagent must **return**, not how. "
+            "Do NOT name tools (get_markdown_headings, rag_search, read_file, …) or list steps. "
+            "Put markdown paths and prior-stage output in `context`. "
+            "Good (literature): '从论文 markdown 提取抗干扰方法步骤与关键公式，返回结构化笔记'. "
+            "Good (docx): '将阶段1笔记写入 docx/xxx.docx 并验证标题与公式'. "
+            "Bad: '先用 get_markdown_headings 读标题，再 rag_search…'."
         ),
-        label=StringSchema("Optional short label for the task (for display)"),
+        label=StringSchema(
+            "Optional; ignored for UI. Tool steps show as [spawn 1], [spawn 2], … automatically."
+        ),
         context=StringSchema(
             "All execution context the subagent needs: markdown/pdf paths, section "
             "anchors, formulas or excerpts from prior stages, output paths, constraints. "
@@ -26,7 +32,7 @@ if TYPE_CHECKING:
             StringSchema("Registered tool name (exact match, e.g. mcp_docx-mcp_search_text)"),
             description=(
                 "Tool names the subagent may call — exact names from Delegation catalog. "
-                "Literature stage: [\"rag_search\", \"read_file\", \"grep\"]. Required on every spawn."
+                "Literature stage: [\"rag_search\", \"get_markdown_headings\", \"read_file\"]. Required on every spawn."
             ),
             min_items=1,
         ),
@@ -63,9 +69,10 @@ class SpawnTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Delegate execution to a subagent (REQUIRED after plan_tasks). "
-            "Always pass `tools`, `skills`, and `context`. "
-            "Subagent work streams to the UI; the runtime auto-waits when the spawn batch ends."
+            "Delegate one stage's work to subagent(s). Multiple parallel spawns are OK "
+            "when subtasks are independent. Pass outcome-focused `task`, plus `tools`, "
+            "`skills`, and `context`. "
+            "Do not spawn separate subagents for headings/RAG/read inside the same literature stage."
         )
 
     async def execute(

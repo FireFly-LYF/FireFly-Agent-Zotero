@@ -1177,9 +1177,9 @@ def agent(
                         return content
                     block = (
                         f"\n{marker}\n"
-                        "[zotero_literature_read_hint] Full-text: grep the markdown path above "
-                        "to locate sections (headings/keywords), then read_file with offset from "
-                        "grep line numbers — do NOT guess offset. "
+                        "[zotero_literature_read_hint] Full-text: subagent uses rag_search / "
+                        "get_markdown_headings / read_file on the markdown path above (tools are "
+                        "in spawn profile — do not list them in spawn task). "
                         "Do NOT read_file the PDF when this marker is present."
                     )
                     if m:

@@ -28,7 +28,7 @@ A .docx file is a ZIP archive of XML files. This server unpacks the archive, par
 
 1. **`create_from_markdown(output_path=…, markdown=…)`** — writes the file. **Do not** call `save_document` afterward unless you `open_document` and edit.
 2. **`open_document(same output_path)`**
-3. **One turn, parallel read-only:** `get_document_info()` + `get_headings()` + multiple `search_text("anchor")` (one anchor per call).
+3. **One turn, parallel read-only:** `get_body_text()` + `get_document_info()` + `get_headings()` (+ optional `search_text("anchor")` for spot checks).
 4. Report to main agent: path + anchors found / paragraph counts. **Stop** — do not loop `save_document`.
 
 `save_document` is for **revise** workflows after `open_document` + edits, not after a fresh `create_from_markdown`.
@@ -37,12 +37,14 @@ A .docx file is a ZIP archive of XML files. This server unpacks the archive, par
 
 ## Same path — create vs revise (FireFly / Zotero)
 
+**Path convention:** unless the user gives an absolute path, all `.docx` paths resolve under **`backend/llm-wiki/docx/`** (`[firefly_docx_dir=…]` in runtime context). Use `docx/文件名.docx` or just `文件名.docx`; do **not** run `pwd`/`dir`/`exec` to hunt for files.
+
 When the user gives or implies a path (e.g. `docx/实验步骤复现指南.docx`), or complains that you “did not modify this file”, **write to that exact path**. Do not create `…详细版.docx` / `…完整版.docx` unless the user asks for a new file.
 
 | Situation | Preferred workflow |
 |-----------|-------------------|
 | File **does not exist** | `create_from_markdown(output_path=user_path, markdown=…)` |
-| File **exists**, partial fix / 补全 / 修订 | `open_document(user_path)` → `search_text` / `get_headings` → `get_paragraph` → edit → `audit_document()` → **`save_document(output_path=user_path)`** |
+| File **exists**, partial fix / 补全 / 修订 | `open_document(user_path)` → **`get_body_text`** / `get_headings` → `search_text` (if needed) → `get_paragraph` → edit → `audit_document()` → **`save_document(output_path=user_path)`** |
 | File **exists**, full replacement | `create_from_markdown(output_path=user_path, …)` **same path** (overwrites), or open → bulk replace → save same path |
 
 ```text
@@ -51,7 +53,7 @@ create_from_markdown(output_path="docx/实验步骤复现指南详细版.docx", 
 
 # 正确：打开原文件，改完后保存到同一路径
 open_document("docx/实验步骤复现指南.docx")
-search_text("步骤1") / get_headings()
+get_body_text() / get_headings() / search_text("步骤1")
 # ... insert_text / replace_text / delete_text ...
 audit_document()
 save_document(output_path="docx/实验步骤复现指南.docx")
@@ -65,19 +67,19 @@ When running as a **subagent**, do not narrate the task — call tools first. Yo
 
 User complaints in Zotero often look like: “步骤是空的”, “你没改这个文件”, “还是有很多空白”. **Never** claim success right after `create_from_markdown` / `save_document` without opening the output.
 
-**Do not** `read_file` a `.docx` — use docx-mcp read tools only.
+**Do not** `read_file` a `.docx` — use docx-mcp read tools only. **Prefer `get_body_text`** for full body text; use `search_text` only to locate anchors for edits.
 
 ```
 1. create_from_markdown(...) or save_document(user_path)
 2. open_document(user_path)                    # if not already open
 3. ONE turn, parallel read-only:
-   get_document_info() + get_headings()
-   + search_text("步骤1") + search_text("YOLO") + search_text("MCA-ISTA")
-   # one anchor per search_text; multiple search_text in same turn = parallel
-4. get_paragraph(para_id) on a sample hit      # body not empty / not placeholder
-5. If user reported blanks → search those section titles; fix + save if missing
-6. audit_document() before final save on edits
-7. Only then → user-visible reply with path + brief confirmation
+   get_body_text() + get_document_info() + get_headings()
+   # optional: search_text("步骤1") for anchor spot-check before editing
+4. Confirm body is non-empty from get_body_text (not placeholder / not blank sections)
+5. If user reported blanks → re-read get_body_text; fix + save if missing
+6. get_paragraph(para_id) only when you need exact run text before delete_text/replace_text
+7. audit_document() before final save on edits
+8. Only then → user-visible reply with path + brief confirmation
 ```
 
 `create_from_markdown` JSON may include `paragraph_count` / `heading_count` — treat **0 or very low** counts as failure and revise before replying.
@@ -89,25 +91,24 @@ create_from_markdown(...) → "已为您创建详细复现指南"
 # 正确
 create_from_markdown(...)
 open_document(path)
-# 同轮并行：结构检查 + 多个锚点各搜一次
-get_headings() + get_document_info()
-+ search_text("步骤1") + search_text("YOLO") + search_text("MCA-ISTA")
-→ 若某锚点未命中或段落为空 → 补写后 save → 再查 → 再回复用户
+# 同轮并行：全文 + 结构
+get_body_text() + get_headings() + get_document_info()
+→ 若 body 为空或缺关键段落 → 补写后 save → get_body_text 再查 → 再回复用户
 ```
 
 ## Workflow
 
 ```
 1. open_document("/path/to/file.docx")
-2. get_headings() + get_document_info()
-   + search_text("anchor1") + search_text("anchor2") + …
-   → all in ONE turn (parallel); one anchor per search_text
-3. get_paragraph(para_id)                    → verify exact text before editing
-4. delete_text(para_id, "old text")          → tracked deletion
-5. insert_text(para_id, "new text")          → tracked insertion
-6. add_comment(para_id, "Reason for change") → explain the edit
-7. audit_document()                          → verify integrity
-8. save_document("/path/to/output.docx")     → save (or omit path to overwrite)
+2. get_body_text() + get_headings() + get_document_info()
+   → all in ONE turn (parallel); get_body_text first for full body text
+3. search_text("anchor") only when locating text to edit
+4. get_paragraph(para_id)                    → verify exact text before editing
+5. delete_text(para_id, "old text")          → tracked deletion
+6. insert_text(para_id, "new text")          → tracked insertion
+7. add_comment(para_id, "Reason for change") → explain the edit
+8. audit_document()                          → verify integrity
+9. save_document("/path/to/output.docx")     → save (or omit path to overwrite)
 ```
 
 **Always `audit_document()` before saving** to catch structural issues (orphaned footnotes, duplicate paraIds, unpaired bookmarks, missing relationship targets).
@@ -125,13 +126,18 @@ get_headings() + get_document_info()
 
 ### Reading
 
+**Priority:** For document body text, call **`get_body_text` first** after `open_document`. Use `get_headings` for structure/paraIds; `search_text` to locate edit targets; `get_paragraph` only before precise edits.
+
 | Tool | Purpose | Key args |
 |------|---------|----------|
+| `get_body_text` | **Full accepted-view body text** (+ footnotes separately) | — |
 | `get_headings` | Heading tree with paraIds | — |
 | `search_text` | Find text in body/footnotes/comments | `query`, `regex` |
-
-**`search_text` pitfalls:** With `regex=false`, English phrases like `"Net 30"` match as a whole string. Multiple CJK keywords in **one** query (`"步骤 方法 检测"`) use OR — prefer **separate** `search_text("步骤1")` + `search_text("YOLO")` in the **same turn** (runtime runs them in parallel). **`[]` only means this query missed** — if `get_headings()` / `get_document_info()` show content, the file is not empty.
 | `get_paragraph` | Full text of one paragraph | `para_id` |
+
+**`get_body_text`:** Returns JSON `{"body": str, "footnotes": str}`. Body = all paragraphs joined by newline (accepted view: insertions kept, deletions excluded). Does not include headers/footers/comments. Prefer over chaining `search_text` when you need to read or verify content.
+
+**`search_text` pitfalls:** With `regex=false`, English phrases like `"Net 30"` match as a whole string. Multiple CJK keywords in **one** query (`"步骤 方法 检测"`) use OR — prefer **separate** `search_text("步骤1")` + `search_text("YOLO")` in the **same turn** (runtime runs them in parallel). **`[]` only means this query missed** — if `get_body_text` / `get_headings()` / `get_document_info()` show content, the file is not empty.
 
 ### Track Changes
 
