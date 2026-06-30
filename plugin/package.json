@@ -1,7 +1,7 @@
 {
   "name": "firefly-agent-zotero",
   "type": "module",
-  "version": "3.7.32",
+  "version": "1.0.0",
   "description": "FireFly Agent for Zotero",
   "config": {
     "addonName": "FireFly-Agent-Zotero",

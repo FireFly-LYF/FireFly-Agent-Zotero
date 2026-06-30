@@ -27,7 +27,7 @@
 解压后目录示例：
 
 ```text
-FireFly-Agent-Zotero-3.7.30/
+FireFly-Agent-Zotero-1.0.0/
   QUICKSTART.txt
   INSTALL.md
   install-backend.ps1
