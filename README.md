@@ -1,92 +1,179 @@
-# 开发日志
+# FireFly-Agent-Zotero
 
-## 2026.4.14
+[![Zotero 7](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-orange?style=flat-square)](plugin/LICENSE)
 
-1. 前端为 Zotero 官方插件模板，已添加 LLM 聊天窗口，功能均未实现
-2. 后端为 nanobot 轻量级 agent，下一步查看其 LLM 调用链路
+**面向 Zotero 的本地 AI 研究 Agent** — 在文献管理软件中嵌入具备任务规划、工具调用、章节感知 RAG 与多模态理解能力的研究助手，学术数据全程保留在本机。
 
-## 2026.4.16
+---
 
-1. 完成 nanobot 框架阅读，新建 nanobot zotero 命令，独立于 nanobot agent
-2. 建立 zotero-nanobot 链路，现在可在 Zotero 里接收到 LLM 回复
-3. 考虑在 Zotero 端单独添加一个消息通道，由 Zotero 向 agent 传递文献信息
+## 项目亮点
 
-## 2026.4.20
+| 维度 | 说明 |
+|------|------|
+| **真实工作流嵌入** | 不是独立 Demo，而是集成在研究人员日常使用的 Zotero 7 条目侧栏 |
+| **隐私优先** | TypeScript 插件 + 本地 Python Bridge（`127.0.0.1:8765`），API Key 与文献数据不出本机 |
+| **Agent 架构** | 自研 `AgentLoop`：多轮 Tool Calling、编排/直接双模式、Subagent 委派、回合 Summarizer |
+| **章节感知 RAG** | PDF → Markdown → JSONL 索引，按章节号加权召回，Agent 自主调用 `rag_search` |
+| **文献知识库** | LLM Wiki 规范维护跨篇综述与单篇分析页 |
+| **文档写作** | 集成 docx-mcp，支持 Markdown 转 Word 与带修订的文档编辑 |
 
-1. 优化 Zotero 页面，新增标签页、文字截取工具已完成
-2. 截图工具仅占位，需要接入外部工具
-3. 考虑查看整个发送给 LLM 的上下文，确保截取的文字和图片被清晰描述
-4. 考虑将 nanobot 重构为 FireFly，且添加多个矢量图
+---
 
-## 2026.4.22
+## 系统架构
 
-1. 添加 LLM wiki 文件夹，含 raw（原始材料）、wiki（LLM 维护）、md 文件
-2. 增加 markdown skill，可实现 pdf→markdown、markdown→rag chunks
-3. 实现 RAG 链路，切分 raw/markdown 至 raw/rag，使用相关性粗召回
-4. 当前检索仅 rag，尚未对 LLM wiki 进行维护，这是下一步的工作目标
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Zotero 7 插件 (TypeScript)                                  │
+│  · 条目侧栏聊天 · 划选文字/图片 · KaTeX · 流式 SSE           │
+│  · 设置页编辑 config · 多标签会话                            │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ HTTP SSE  127.0.0.1:8765
+┌──────────────────────────▼──────────────────────────────────┐
+│  Zotero Bridge (Python / aiohttp)                            │
+│  · 注入当前文献上下文 · 会话管理 · 流式推送 tool hints       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│  FireFly Agent Engine                                        │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
+│  │ AgentLoop   │→ │ ToolRegistry │→ │ LLM Provider        │ │
+│  │ 编排/直接   │  │ RAG/Zotero/  │  │ (OpenAI 兼容)       │ │
+│  │ Subagent    │  │ Web/Docx/FS  │  │                     │ │
+│  └─────────────┘  └──────────────┘  └─────────────────────┘ │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│  llm-wiki/  ·  raw/pdf · raw/markdown · raw/rag · wiki/     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-## 2026.4.23
+**Agent 执行模式**
 
-1. 将 nanobot 完全重构为 FireFly，修改了 onboard 和启动配置；现在会在当前路径生成 workspace 和 config，启动时会读取上次 onboard 的路径配置
-2. 新增意图识别以改善 rag 检索的逻辑，避免所有时刻都进行 rag
-3. 前端增加 KaTeX 库，支持公式显示；为适配窄侧边栏，对长公式采用自动换行策略
-4. 下一步加入 LLM wiki 联合检索
+- **直接模式**：主 Agent 自行调用 `rag_search`、`read_file`、docx 等工具，适合单步问答与简单检索。
+- **编排模式**：`plan_tasks` 规划阶段 → 按阶段 `spawn` 子 Agent（文献抽取 / docx 写作等 profile）→ Summarizer 汇总最终回复。
 
-## 2026.5.7
+---
 
-1. 修复了公式显示 bug，现在文本内的少字公式都会被正常解析
-2. 修改了 llm-wiki 的目录设置，现在为每篇文章一个 wiki 与多篇共用的 `_synthesis`
-3. 修复了 markdown→rag 切分时存在不严格按照标题号切分的问题，该问题导致大段文字无法召回
+## 功能概览
 
-## 2026.5.11
+### 前端（Zotero 插件）
 
-1. 完全重置了公式渲染逻辑，参考 llm_for_zotero
-2. 新增删除、重置按钮，可删除/重新发送历史对话
-3. 现在可通过 markdown 撰写 wiki，用户提问时将 wiki 组装为上下文
-4. LLM wiki 目前仅进行了单文件测试，尚未验证能否总结出多篇文章之间的联系
+- 条目侧栏 LLM 聊天面板，支持多标签会话
+- PDF 阅读器划选文字、图片上传作为多模态上下文
+- KaTeX 公式渲染（含窄栏自动换行）
+- 流式展示 Agent 回复、Thinking 与 Tool 调用进度
+- 设置页在线编辑 `config.json` / `user.json` / `context.json`
 
-## 2026.5.25
+### 后端（FireFly Agent）
 
-1. 插件设置页可编辑 `backend/config` 三份 JSON
-2. GitHub Release 一体包：XPI + firefly_ai wheel + llm-wiki 模板 + 安装脚本，见 [INSTALL.md](INSTALL.md)
+| 工具 | 用途 |
+|------|------|
+| `rag_search` / `rag_index` / `get_markdown_headings` | 章节感知文献检索 |
+| `zotero_search` / `zotero_read_item` | 读取 Zotero 库元数据、笔记、批注 |
+| `read_file` / `grep` / `glob` | 工作区与 Wiki 文件操作 |
+| `web_search` / `web_fetch` | 外部信息检索 |
+| docx-mcp | Word 文档读写与修订 |
+| `spawn` / `plan_tasks` | 子 Agent 委派与多阶段编排 |
+| `exec` / MCP | Shell 与外部 MCP 服务 |
 
-## 2026.6.25
+### 文献知识库（LLM Wiki）
 
-1. 阅读 tool_calls 调用逻辑，阅读 agent loop 核心循环，分析工具的并行/串行调用
-2. 新增 tool：docx-mcp，实现 docx 格式文本读写
-3. rag 改为 agent 自主调用的工具，优先读取 markdown 格式文件而非 pdf
-4. 现有问题：Zotero 多轮工具调用未展示，Agent 运行时间较长
+- `raw/`：PDF / Markdown / RAG 索引（与 Zotero 目录镜像）
+- `wiki/`：LLM 维护的单篇分析页与 `_synthesis` 跨篇综述
+- 详见 [`backend/llm-wiki/README.md`](backend/llm-wiki/README.md)
 
-## 2026.6.26 issue
+---
 
-1. 对 markdown 用 grep 定位，不要凭 offset 猜
-2. 用户指定路径时，用同一路径 `create_from_markdown` 或 docx 编辑工具覆盖
-3. 考虑不把带 tool_calls 的超长 assistant 草稿写入用户可见历史，或只存摘要
-4. 写 docx 后 read_file / 打开检查是否真有空白段落，再回复用户
+## 快速开始
 
-## 2026.6.27
+### 用户安装（Windows 一键包）
 
-1. Summarizer 整轮任务结束后只调用一次，无工具时直接流式输出 agent 回复
-2. 工作流中明确 `get_headings` + `search_text` 等只读操作应同轮并行
-3. 修复 `search_text` `regex=false` 字串匹配时 `|` 导致空结果的问题
+1. 在 [GitHub Releases](https://github.com/FireFly-LYF/FireFly-agent-zotero/releases) 下载 `FireFly-Agent-Zotero-vX.Y.Z-windows.zip`
+2. 解压后运行 `install-backend.ps1` → 配置 API Key → `start-bridge.ps1`
+3. 在 Zotero 中安装 `plugin/fire-fly-agent-zotero.xpi`
 
-**issue：**
+完整步骤见 [INSTALL.md](INSTALL.md)。
 
-1. 模型不能够并行调用工具，导致任务时间很长
-2. 前端展示非常僵硬，动态展示尚未实现
-3. thinking 文本存在首行缩进不统一的问题
-4. 文本样式不美观，可参考 llm_for_zotero
+### 开发者（源码）
 
-## 2026.6.28
+```powershell
+# 后端
+cd backend\FireFly
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -e ".[api,pdf]"
+firefly onboard -c ..\config\config.json -w ..\workspace
+python scripts\zotero_bridge_launcher.py
 
-1. 模型切换为 glm-4.5-air，在精简 prompt 下可一次召回多个 tool calls
-2. 上下文过大导致实际使用中对可并行的工具仍是串行调用
-3. 修改架构：主 agent 编排任务，派发 tool 和 skill，subagent 具体执行，上下文大幅减少，速度明显加快
-4. **issue**：subagent 大量多次阅读 md，定位文章内容，耗时较长，效率极低
+# 前端
+cd ..\..\plugin
+npm install
+npm start
+```
 
-## 2026.6.29
+---
 
-1. `rag_search` 工具效果不佳，在现有模糊输入下难以召回指定内容；现已移除父类召回，防止召回大量无关内容，导致文本过多被截断后还需多次搜索
-2. 主 agent 在短时间内连续 spawn 了十多个子任务，且每个子任务都在重复 `rag_search`；该 bug 为未使用 `plan_tasks` 模式引发，现已将 agent 分为编排模式和直接模式
-3. Agent 自行判断启用编排模式/直接模式，但目前测试中均使用直接模式完成
-4. 移除 runtime 字符匹配强制路由；`Summarizer` 类封装回合总结；docx 路径统一至 `backend/llm-wiki/docx/`；修复 thinking 首行缩进展示
+## 项目结构
+
+```
+FireFly-Agent-Zotero/
+├── plugin/                 # Zotero 7 插件（TypeScript）
+│   ├── src/modules/        # 聊天 UI、Bridge 通信、Wiki 同步
+│   └── addon/              # 静态资源、本地化、manifest
+├── backend/
+│   ├── FireFly/            # Agent 引擎（Python，131+ 单元测试）
+│   │   └── firefly/
+│   │       ├── agent/      # AgentLoop、Runner、Subagent、Summarizer
+│   │       ├── zotero_interface/  # Bridge 与 Zotero 命令
+│   │       └── skills/     # markdown、docx、zotero、wiki 等 Skill
+│   ├── llm-wiki/           # 文献知识库模板与规范
+│   ├── config/             # 运行时配置（config.json 不入库）
+│   └── download/docx-mcp/  # Word 文档 MCP 服务
+├── release/                # Windows 安装脚本
+└── docs/                   # 架构、路线图、简历包装等文档
+```
+
+---
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 前端 | TypeScript, Zotero 7 Plugin API, KaTeX, zotero-plugin-scaffold |
+| 后端 | Python 3.11+, aiohttp, Pydantic, LiteLLM 兼容 Provider |
+| Agent | 自研 ToolRegistry + AgentLoop（非 LangChain） |
+| RAG | PyMuPDF4LLM, 章节号加权 JSONL 索引 |
+| 通信 | HTTP SSE 流式 Bridge（127.0.0.1:8765） |
+| 测试 | pytest（131 文件）, Mocha（插件 typecheck） |
+| 发布 | GitHub Actions → Windows ZIP 一体包 |
+
+---
+
+## 文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [INSTALL.md](INSTALL.md) | 用户安装指南 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 架构设计与模块说明 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 路线图与待办 |
+| [docs/RESUME.md](docs/RESUME.md) | 简历 / 面试包装要点 |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 开发日志 |
+| [docs/ISSUE.md](docs/ISSUE.md) | 已知问题与技术备忘 |
+| [backend/llm-wiki/AGENTS.md](backend/llm-wiki/AGENTS.md) | Wiki 维护规范 |
+
+---
+
+## 许可证
+
+- 插件： [AGPL-3.0-or-later](plugin/LICENSE)（基于 Zotero Plugin Template）
+- 后端 FireFly： [MIT](backend/FireFly/LICENSE)
+
+---
+
+## 相关链接
+
+- GitHub：[FireFly-LYF/FireFly-agent-zotero](https://github.com/FireFly-LYF/FireFly-agent-zotero)
+- 上游 Agent 框架：基于 [nanobot](https://github.com/nanobot-ai/nanobot) 重构为 FireFly
