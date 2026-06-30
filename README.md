@@ -15,7 +15,7 @@
 |------|------|
 | **真实工作流嵌入** | 不是独立 Demo，而是集成在研究人员日常使用的 Zotero 7 条目侧栏 |
 | **隐私优先** | TypeScript 插件 + 本地 Python Bridge（`127.0.0.1:8765`），API Key 与文献数据不出本机 |
-| **Agent 架构** | 自研 `AgentLoop`：多轮 Tool Calling、编排/直接双模式、Subagent 委派、回合 Summarizer |
+| **Agent 架构** | `AgentLoop`：多轮 Tool Calling、编排/直接双模式、Subagent 委派、回合 Summarizer |
 | **章节感知 RAG** | PDF → Markdown → JSONL 索引，按章节号加权召回，Agent 自主调用 `rag_search` |
 | **文献知识库** | LLM Wiki 规范维护跨篇综述与单篇分析页 |
 | **文档写作** | 集成 docx-mcp，支持 Markdown 转 Word 与带修订的文档编辑 |
