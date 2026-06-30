@@ -40,7 +40,7 @@
 │  FireFly Agent Engine                                        │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐ │
 │  │ AgentLoop   │→ │ ToolRegistry │→ │ LLM Provider        │ │
-│  │ 编排/直接   │  │ RAG/Zotero/  │  │ (OpenAI 兼容)       │ │
+│  │ 编排/直接    │  │ RAG/Zotero/  │  │ (OpenAI 兼容)       │ │
 │  │ Subagent    │  │ Web/Docx/FS  │  │                     │ │
 │  └─────────────┘  └──────────────┘  └─────────────────────┘ │
 └──────────────────────────┬──────────────────────────────────┘
@@ -173,7 +173,4 @@ FireFly-Agent-Zotero/
 
 ---
 
-## 相关链接
 
-- GitHub：[FireFly-LYF/FireFly-agent-zotero](https://github.com/FireFly-LYF/FireFly-agent-zotero)
-- 上游 Agent 框架：基于 [nanobot](https://github.com/nanobot-ai/nanobot) 重构为 FireFly
